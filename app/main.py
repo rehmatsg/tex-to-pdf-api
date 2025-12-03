@@ -16,5 +16,3 @@ async def health_check():
         "version": settings.VERSION,
         "tex_available": True, # TODO: Check actual availability
     }
-
-return app
