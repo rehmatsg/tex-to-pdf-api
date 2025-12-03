@@ -9,6 +9,10 @@ app = FastAPI(
 
 app.include_router(routes_compile.router)
 
+@app.get("/")
+async def root():
+    return {"message": "Welcome to the LaTeX API!"}
+
 @app.get("/health")
 async def health_check():
     return {
