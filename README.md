@@ -69,7 +69,7 @@ curl -X POST "http://localhost:8000/compile/sync" \
 
 1. Push this repo to GitHub.
 2. Create a new project on Railway from the repo.
-3. Railway will automatically detect `nixpacks.toml` and install Python + TeX Live.
+3. Railway will automatically detect `nixpacks.toml` and install Python + TeX Live (with `latexmk` and common fonts via APT).
 4. The start command is defined in `nixpacks.toml`.
 
 ## Configuration
