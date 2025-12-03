@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from app.core.config import settings
 from app.api import routes_compile
+import shutil
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -18,5 +19,5 @@ async def health_check():
     return {
         "status": "ok",
         "version": settings.VERSION,
-        "tex_available": True, # TODO: Check actual availability
+        "tex_available": shutil.which("pdflatex") is not None,
     }
