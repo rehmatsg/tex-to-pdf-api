@@ -4,7 +4,7 @@ import shutil
 import time
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple, List
 from app.models.compile import CompileOptions, CompileResult
 from app.core.config import settings
 
@@ -58,7 +58,9 @@ def compile_latex_sync(source_file_path: Path, options: CompileOptions) -> Compi
                         success=False,
                         compile_time_ms=0,
                         log=f"Main file '{options.main_file}' not found in zip.",
-                        error_message="Main file not found"
+                        error_message="Main file not found",
+                        warnings=[],
+                        errors=[]
                     )
                 main_file_name = options.main_file
             else:
@@ -76,14 +78,18 @@ def compile_latex_sync(source_file_path: Path, options: CompileOptions) -> Compi
                             success=False,
                             compile_time_ms=0,
                             log="Multiple .tex files found. Please specify 'main_file'.",
-                            error_message="Ambiguous main file"
+                            error_message="Ambiguous main file",
+                            warnings=[],
+                            errors=[]
                         )
                     else:
                          return CompileResult(
                             success=False,
                             compile_time_ms=0,
                             log="No .tex files found in zip.",
-                            error_message="No .tex files found"
+                            error_message="No .tex files found",
+                            warnings=[],
+                            errors=[]
                         )
         else:
             # Fallback/Error for now until zip is implemented
@@ -91,7 +97,9 @@ def compile_latex_sync(source_file_path: Path, options: CompileOptions) -> Compi
                 success=False,
                 compile_time_ms=0,
                 log="Unsupported file type. Only .tex and .zip supported.",
-                error_message="Unsupported file type"
+                error_message="Unsupported file type",
+                warnings=[],
+                errors=[]
             )
 
         log_output = ""
@@ -131,7 +139,9 @@ def compile_latex_sync(source_file_path: Path, options: CompileOptions) -> Compi
                     success=False,
                     compile_time_ms=int((time.time() - start_time) * 1000),
                     log=log_output,
-                    error_message="Compilation timed out"
+                    error_message="Compilation timed out",
+                    warnings=[],
+                    errors=[]
                 )
         
         # Check for output PDF
@@ -172,13 +182,19 @@ def compile_latex_sync(source_file_path: Path, options: CompileOptions) -> Compi
         else:
             truncated = False
 
+        errors, warnings = _parse_log_messages(log_output)
+
+        error_message = None if success else (errors[0] if errors else _parse_latex_error(log_output))
+
         return CompileResult(
             success=success,
             pdf_path=expected_pdf if success else None,
             compile_time_ms=compile_time,
             log=log_output,
-            error_message=None if success else _parse_latex_error(log_output),
-            log_truncated=truncated
+            error_message=error_message,
+            log_truncated=truncated,
+            warnings=warnings,
+            errors=errors
         )
 
     except Exception as e:
@@ -187,7 +203,9 @@ def compile_latex_sync(source_file_path: Path, options: CompileOptions) -> Compi
             success=False,
             compile_time_ms=int((time.time() - start_time) * 1000),
             log=str(e),
-            error_message=f"Internal error: {str(e)}"
+            error_message=f"Internal error: {str(e)}",
+            warnings=[],
+            errors=[]
         )
 
 def _parse_latex_error(log: str) -> str:
@@ -199,6 +217,21 @@ def _parse_latex_error(log: str) -> str:
         if line.startswith("! "):
             return line[2:].strip()
     return "Compilation failed"
+
+def _parse_log_messages(log: str) -> Tuple[List[str], List[str]]:
+    """
+    Extract errors and warnings from the LaTeX log output.
+    Errors are lines starting with '! '.
+    Warnings include lines containing 'LaTeX Warning'.
+    """
+    errors: List[str] = []
+    warnings: List[str] = []
+    for line in log.splitlines():
+        if line.startswith("! "):
+            errors.append(line[2:].strip())
+        if "LaTeX Warning" in line:
+            warnings.append(line.strip())
+    return errors, warnings
 
 def _scan_for_dangerous_macros(file_path: Path):
     """

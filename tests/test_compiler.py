@@ -40,6 +40,8 @@ def test_compile_success(mock_subprocess, mock_shutil):
         assert result.success is True
         assert result.log == "--- Pass 1 ---\nOutput log"
         assert result.pdf_path is not None
+        assert result.warnings == []
+        assert result.errors == []
 
 def test_compile_failure(mock_subprocess, mock_shutil):
     # Setup mock to return failure
@@ -72,6 +74,23 @@ def test_error_parsing(mock_subprocess, mock_shutil):
         
         assert result.success is False
         assert result.error_message == "Undefined control sequence."
+        assert "Undefined control sequence." in result.errors
+
+def test_warning_parsing(mock_subprocess, mock_shutil):
+    # Setup mock to return success with a warning in the log
+    process_mock = MagicMock()
+    process_mock.returncode = 0
+    process_mock.stdout = "LaTeX Warning: Label(s) may have changed.\n"
+    mock_subprocess.return_value = process_mock
+
+    with patch("pathlib.Path.exists") as mock_exists:
+        mock_exists.return_value = True
+
+        options = CompileOptions(passes=1)
+        result = compile_latex_sync(Path("dummy.tex"), options)
+
+        assert result.success is True
+        assert "LaTeX Warning: Label(s) may have changed." in result.warnings
 
 def test_dangerous_macro(mock_subprocess, mock_shutil):
     # Setup mock to return success (should not be reached)

@@ -109,6 +109,55 @@ Compile LaTeX source code into a PDF.
 
 ---
 
+#### Validate LaTeX (no PDF)
+
+Check if LaTeX code compiles and return errors/warnings without streaming a PDF.
+
+| Method | Endpoint             | Description                     |
+|--------|----------------------|---------------------------------|
+| POST   | `/compile/validate`  | Validate LaTeX via JSON payload |
+
+**Request Body (application/json):**
+
+| Field     | Type   | Required | Default    | Description                         |
+|-----------|--------|----------|------------|-------------------------------------|
+| `code`    | String | Yes      | -          | Raw LaTeX source code               |
+| `passes`  | Int    | No       | `1`        | Number of compilation passes        |
+| `engine`  | String | No       | `pdflatex` | LaTeX engine (currently pdflatex)   |
+
+**Response:**
+
+- **Status:** `200 OK` (compilation success or failure is conveyed in the payload)
+- **Content-Type:** `application/json`
+
+```json
+{
+  "compilable": true,
+  "warnings": ["LaTeX Warning: Label(s) may have changed."],
+  "errors": [],
+  "log": "--- Pass 1 ---\\n...log output...",
+  "log_truncated": false,
+  "compile_time_ms": 120
+}
+```
+
+**Error Codes:**
+
+| Status | Description                      |
+|--------|----------------------------------|
+| `400`  | Missing/empty `code` field       |
+| `413`  | Code too large (max 10MB)        |
+
+**Example:**
+
+```bash
+curl -X POST "http://localhost:8000/compile/validate" \
+  -H "Content-Type: application/json" \
+  -d '{"code": "\\documentclass{article}\\begin{document}Hello\\end{document}"}'
+```
+
+---
+
 ### Usage Examples
 
 #### Health Check

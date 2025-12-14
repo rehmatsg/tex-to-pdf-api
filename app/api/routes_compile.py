@@ -6,8 +6,9 @@ import shutil
 import tempfile
 import os
 
-from app.models.compile import CompileOptions
+from app.models.compile import CompileOptions, ValidateRequest, ValidateResponse
 from app.services.latex_compiler import compile_latex_sync
+from app.core.config import settings
 
 router = APIRouter()
 
@@ -104,5 +105,39 @@ async def compile_sync(
             
     finally:
         # Cleanup uploaded file
+        if tmp_path.exists():
+            os.remove(tmp_path)
+
+@router.post("/compile/validate", response_model=ValidateResponse)
+async def validate_compile(payload: ValidateRequest):
+    """
+    Validate whether provided LaTeX code compiles without returning the PDF.
+    Accepts JSON body with a `code` string and optional `passes`/`engine`.
+    """
+    code = payload.code or ""
+    if not code.strip():
+        raise HTTPException(status_code=400, detail="'code' must be provided and non-empty")
+
+    code_bytes = code.encode("utf-8")
+    if len(code_bytes) > settings.MAX_UPLOAD_SIZE:
+        raise HTTPException(status_code=413, detail="Code too large (max 10MB)")
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".tex") as tmp_file:
+        tmp_file.write(code_bytes)
+        tmp_path = Path(tmp_file.name)
+
+    try:
+        options = CompileOptions(engine=payload.engine, passes=payload.passes, main_file=None)
+        result = compile_latex_sync(tmp_path, options)
+
+        return ValidateResponse(
+            compilable=result.success,
+            errors=result.errors,
+            warnings=result.warnings,
+            log=result.log,
+            log_truncated=result.log_truncated,
+            compile_time_ms=result.compile_time_ms,
+        )
+    finally:
         if tmp_path.exists():
             os.remove(tmp_path)

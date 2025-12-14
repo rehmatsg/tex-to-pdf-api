@@ -1,5 +1,5 @@
-from pydantic import BaseModel
-from typing import Optional, Literal
+from pydantic import BaseModel, Field
+from typing import Optional, Literal, List
 from pathlib import Path
 
 class CompileOptions(BaseModel):
@@ -15,3 +15,18 @@ class CompileResult(BaseModel):
     log: str
     error_message: Optional[str] = None
     log_truncated: bool = False
+    warnings: List[str] = Field(default_factory=list)
+    errors: List[str] = Field(default_factory=list)
+
+class ValidateRequest(BaseModel):
+    code: str
+    passes: int = 1
+    engine: Literal["pdflatex"] = "pdflatex"
+
+class ValidateResponse(BaseModel):
+    compilable: bool
+    errors: List[str]
+    warnings: List[str]
+    log: str
+    log_truncated: bool
+    compile_time_ms: int
