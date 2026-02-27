@@ -1,257 +1,205 @@
-import subprocess
-import tempfile
+"""
+v1-compatible compilation service.
+
+This module preserves the original compile_latex_sync() interface for backward
+compatibility with v1 routes, but internally delegates to the new pipeline.
+
+The work directory is now tracked and returned alongside the result so callers
+can guarantee cleanup.
+"""
+
 import shutil
 import time
-import os
+import zipfile
 from pathlib import Path
 from typing import Optional, Tuple, List
-from app.models.compile import CompileOptions, CompileResult
-from app.core.config import settings
 
-def compile_latex_sync(source_file_path: Path, options: CompileOptions) -> CompileResult:
+from app.core.config import settings
+from app.models.compile import CompileOptions, CompileResult
+from app.services.pipeline import compile_project, _parse_log_messages
+from app.services.validators import scan_dangerous_macros, ValidationError
+from app.services.workdir import create_workdir, cleanup_workdir, safe_write_file
+
+
+def compile_latex_sync(
+    source_file_path: Path,
+    options: CompileOptions,
+) -> CompileResult:
     """
-    Compiles a LaTeX project synchronously.
-    
+    Compiles a LaTeX project synchronously (v1 interface).
+
     Args:
         source_file_path: Path to the uploaded .tex or .zip file.
         options: Compilation options.
-        
+
     Returns:
-        CompileResult object.
+        CompileResult object. If successful, pdf_path points into a temporary
+        work directory that the CALLER must clean up by calling
+        cleanup_work_dir(result) after reading the PDF.
+
+    Note:
+        The caller is responsible for cleaning up the work directory.
+        Use compile_latex_sync_safe() for automatic cleanup with a callback,
+        or call cleanup_work_dir() manually after reading the PDF.
     """
     start_time = time.time()
-    
-    # Create a temporary working directory
-    work_dir = Path(tempfile.mkdtemp(prefix="latex_job_"))
-    
+    work_dir = create_workdir()
+
     try:
-        # Setup files in work_dir
-        main_file_name = "main.tex"
-        
-        # Determine if input is zip or tex
-        # For now, assuming single .tex file as per minimal task
-        # TODO: Add zip support
-        
-        if source_file_path.suffix == ".tex":
-            # Scan for dangerous macros
-            _scan_for_dangerous_macros(source_file_path)
-            shutil.copy(source_file_path, work_dir / main_file_name)
-        elif source_file_path.suffix == ".zip":
-            import zipfile
-            with zipfile.ZipFile(source_file_path, 'r') as zip_ref:
-                # Security check: Validate paths
-                for member in zip_ref.namelist():
-                    if member.startswith("/") or ".." in member:
-                        raise ValueError(f"Invalid path in zip: {member}")
-                
-                zip_ref.extractall(work_dir)
-            
-            # Scan all .tex files in work_dir
-            for tex_file in work_dir.glob("**/*.tex"):
-                _scan_for_dangerous_macros(tex_file)
-            
-            # Determine main file
-            if options.main_file:
-                # Verify it exists
-                if not (work_dir / options.main_file).exists():
-                     return CompileResult(
-                        success=False,
-                        compile_time_ms=0,
-                        log=f"Main file '{options.main_file}' not found in zip.",
-                        error_message="Main file not found",
-                        warnings=[],
-                        errors=[]
-                    )
-                main_file_name = options.main_file
-            else:
-                # Heuristic: Look for main.tex, or the only .tex file
-                if (work_dir / "main.tex").exists():
-                    main_file_name = "main.tex"
-                else:
-                    tex_files = list(work_dir.glob("*.tex"))
-                    if len(tex_files) == 1:
-                        main_file_name = tex_files[0].name
-                    elif len(tex_files) > 1:
-                         # Ambiguous, fail or pick one? Let's fail for now or pick first?
-                         # Better to fail and ask user to specify
-                         return CompileResult(
-                            success=False,
-                            compile_time_ms=0,
-                            log="Multiple .tex files found. Please specify 'main_file'.",
-                            error_message="Ambiguous main file",
-                            warnings=[],
-                            errors=[]
-                        )
-                    else:
-                         return CompileResult(
-                            success=False,
-                            compile_time_ms=0,
-                            log="No .tex files found in zip.",
-                            error_message="No .tex files found",
-                            warnings=[],
-                            errors=[]
-                        )
-        else:
-            # Fallback/Error for now until zip is implemented
-             return CompileResult(
+        main_file = _setup_workdir_from_source(source_file_path, work_dir, options)
+        if main_file is None:
+            # _setup_workdir_from_source returns None on error,
+            # but we need to return a proper CompileResult.
+            # This shouldn't happen -- errors are raised as exceptions.
+            return CompileResult(
                 success=False,
-                compile_time_ms=0,
-                log="Unsupported file type. Only .tex and .zip supported.",
-                error_message="Unsupported file type",
+                compile_time_ms=int((time.time() - start_time) * 1000),
+                log="Failed to set up work directory.",
+                error_message="Internal error during file setup",
                 warnings=[],
-                errors=[]
+                errors=[],
             )
 
-        log_output = ""
-        success = False
-        
-        # Run compilation passes
-        for i in range(options.passes):
-            # Construct command
-            cmd = [
-                settings.TEX_BIN_PATH,
-                "-interaction=nonstopmode",
-                "-halt-on-error",
-                "-file-line-error",
-                "-no-shell-escape",
-                main_file_name
-            ]
-            
-            try:
-                result = subprocess.run(
-                    cmd,
-                    cwd=work_dir,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    timeout=options.timeout_seconds,
-                    text=True
-                )
-                
-                log_output += f"--- Pass {i+1} ---\n"
-                log_output += result.stdout
-                
-                if result.returncode != 0:
-                    break # Stop on error
-                
-            except subprocess.TimeoutExpired:
-                log_output += f"\n--- Timeout after {options.timeout_seconds}s ---"
-                return CompileResult(
-                    success=False,
-                    compile_time_ms=int((time.time() - start_time) * 1000),
-                    log=log_output,
-                    error_message="Compilation timed out",
-                    warnings=[],
-                    errors=[]
-                )
-        
-        # Check for output PDF
-        # pdflatex usually produces {main_file_name}.pdf -> main.pdf
-        expected_pdf = work_dir / "main.pdf"
-        
-        if expected_pdf.exists():
-            success = True
-            # We need to keep the PDF file somewhere if we want to return it.
-            # But the temp dir will be deleted. 
-            # For the service, we might return the path in the temp dir, 
-            # and let the caller handle reading/streaming it before cleanup.
-            # OR, we can read it into memory here? 
-            # Better: Return path, but caller MUST handle cleanup of work_dir?
-            # Actually, `compile_latex_sync` creates the temp dir. 
-            # If we return a path inside it, we can't delete it here.
-            # Let's NOT delete work_dir here if success, and let caller handle it?
-            # Or better: Copy PDF to a separate temp file that is managed by caller?
-            # For now, let's leave the work_dir cleanup to the caller or use a context manager approach later.
-            # BUT, to keep it simple and safe:
-            # We will NOT delete work_dir here. We will rely on the caller to clean up.
-            # Wait, `tempfile.mkdtemp` creates a dir that persists.
-            # We should probably return the work_dir path too so caller can clean it up.
-            # Or, we can read the PDF bytes? No, that might be large.
-            
-            # Let's assume for now we return the path, and we need a mechanism to cleanup.
-            # Ideally, we'd use a context manager for the work_dir.
-            pass
-        else:
-            success = False
-            
-        compile_time = int((time.time() - start_time) * 1000)
-        
-        # Truncate log if needed (simple implementation)
-        if len(log_output) > 50 * 1024:
-            log_output = log_output[:50*1024] + "\n... [Truncated]"
-            truncated = True
-        else:
-            truncated = False
+        result = compile_project(work_dir, main_file, options)
 
-        errors, warnings = _parse_log_messages(log_output)
+        # If compilation failed, clean up immediately since there's no PDF
+        # to return.
+        if not result.success:
+            cleanup_workdir(work_dir)
 
-        error_message = None if success else (errors[0] if errors else _parse_latex_error(log_output))
+        # If successful, the caller MUST clean up work_dir after reading
+        # the PDF from result.pdf_path.
+        return result
 
+    except ValidationError as e:
+        cleanup_workdir(work_dir)
         return CompileResult(
-            success=success,
-            pdf_path=expected_pdf if success else None,
-            compile_time_ms=compile_time,
-            log=log_output,
-            error_message=error_message,
-            log_truncated=truncated,
-            warnings=warnings,
-            errors=errors
+            success=False,
+            compile_time_ms=int((time.time() - start_time) * 1000),
+            log=str(e),
+            error_message=str(e),
+            warnings=[],
+            errors=[str(e)],
+        )
+
+    except ValueError as e:
+        cleanup_workdir(work_dir)
+        return CompileResult(
+            success=False,
+            compile_time_ms=int((time.time() - start_time) * 1000),
+            log=str(e),
+            error_message=str(e),
+            warnings=[],
+            errors=[],
         )
 
     except Exception as e:
-        # Ensure cleanup on crash if possible, or just log
+        cleanup_workdir(work_dir)
         return CompileResult(
             success=False,
             compile_time_ms=int((time.time() - start_time) * 1000),
             log=str(e),
             error_message=f"Internal error: {str(e)}",
             warnings=[],
-            errors=[]
+            errors=[],
         )
 
-def _parse_latex_error(log: str) -> str:
-    """
-    Simple parser to extract the first error message from LaTeX log.
-    """
-    # Look for lines starting with "! "
-    for line in log.splitlines():
-        if line.startswith("! "):
-            return line[2:].strip()
-    return "Compilation failed"
 
-def _parse_log_messages(log: str) -> Tuple[List[str], List[str]]:
+def cleanup_work_dir(result: CompileResult) -> None:
     """
-    Extract errors and warnings from the LaTeX log output.
-    Errors are lines starting with '! '.
-    Warnings include lines containing 'LaTeX Warning'.
-    """
-    errors: List[str] = []
-    warnings: List[str] = []
-    for line in log.splitlines():
-        if line.startswith("! "):
-            errors.append(line[2:].strip())
-        if "LaTeX Warning" in line:
-            warnings.append(line.strip())
-    return errors, warnings
+    Clean up the work directory associated with a CompileResult.
 
-def _scan_for_dangerous_macros(file_path: Path):
+    Safe to call even if pdf_path is None or the directory doesn't exist.
     """
-    Scans a TeX file for dangerous macros.
-    Raises ValueError if found.
+    if result.pdf_path is not None:
+        # pdf_path is something like /tmp/latex_job_xxx/main.pdf
+        # The work dir is its parent (or grandparent for nested main files).
+        # Walk up to find the latex_job_ directory.
+        work_dir = result.pdf_path
+        while work_dir.name and not work_dir.name.startswith("latex_job_"):
+            work_dir = work_dir.parent
+        if work_dir.name.startswith("latex_job_"):
+            cleanup_workdir(work_dir)
+
+
+def _setup_workdir_from_source(
+    source_file_path: Path,
+    work_dir: Path,
+    options: CompileOptions,
+) -> Optional[str]:
     """
-    dangerous = [
-        r"\write18", r"\immediate\write18", 
-        r"\input|", r"\openout", r"\openin",
-        r"\newwrite", r"\newread"
-    ]
-    
-    try:
-        content = file_path.read_text(errors="ignore")
-        for macro in dangerous:
-            if macro in content:
-                raise ValueError(f"Dangerous macro detected: {macro}")
-    except Exception as e:
-        if isinstance(e, ValueError):
-            raise
-        # Ignore read errors or treat as suspicious?
-        # For now, ignore non-text files or encoding issues
-        pass
+    Set up the work directory from a .tex or .zip source file.
+
+    Returns the main_file relative path to use for compilation.
+    Raises ValueError or ValidationError on problems.
+    """
+    if source_file_path.suffix == ".tex":
+        return _setup_from_tex(source_file_path, work_dir)
+
+    elif source_file_path.suffix == ".zip":
+        return _setup_from_zip(source_file_path, work_dir, options)
+
+    else:
+        raise ValueError("Unsupported file type. Only .tex and .zip supported.")
+
+
+def _setup_from_tex(source_file_path: Path, work_dir: Path) -> str:
+    """Copy a single .tex file into work_dir as main.tex, scanning for macros."""
+    content = source_file_path.read_bytes()
+    scan_dangerous_macros(content, "main.tex")
+    safe_write_file(work_dir, "main.tex", content)
+    return "main.tex"
+
+
+def _setup_from_zip(
+    source_file_path: Path,
+    work_dir: Path,
+    options: CompileOptions,
+) -> str:
+    """Extract a zip file into work_dir, scanning for dangerous content."""
+    with zipfile.ZipFile(source_file_path, "r") as zip_ref:
+        # Security: validate all paths before extracting
+        for member in zip_ref.namelist():
+            if member.startswith("/") or ".." in member:
+                raise ValueError(f"Invalid path in zip: {member}")
+
+        zip_ref.extractall(work_dir)
+
+    # Scan all scannable files for dangerous macros
+    for tex_file in work_dir.rglob("*.tex"):
+        scan_dangerous_macros(tex_file.read_bytes(), tex_file.name)
+    for sty_file in work_dir.rglob("*.sty"):
+        scan_dangerous_macros(sty_file.read_bytes(), sty_file.name)
+    for cls_file in work_dir.rglob("*.cls"):
+        scan_dangerous_macros(cls_file.read_bytes(), cls_file.name)
+
+    # Determine main file
+    main_file = _determine_main_file(work_dir, options)
+    return main_file
+
+
+def _determine_main_file(work_dir: Path, options: CompileOptions) -> str:
+    """
+    Determine the main .tex file for compilation.
+
+    Priority:
+    1. options.main_file if set and exists
+    2. main.tex in root
+    3. Single .tex file in root
+    4. Error if ambiguous
+    """
+    if options.main_file:
+        if not (work_dir / options.main_file).exists():
+            raise ValueError(f"Main file '{options.main_file}' not found in zip.")
+        return options.main_file
+
+    if (work_dir / "main.tex").exists():
+        return "main.tex"
+
+    tex_files = list(work_dir.glob("*.tex"))
+    if len(tex_files) == 1:
+        return tex_files[0].name
+    elif len(tex_files) > 1:
+        raise ValueError("Multiple .tex files found. Please specify 'main_file'.")
+    else:
+        raise ValueError("No .tex files found in zip.")

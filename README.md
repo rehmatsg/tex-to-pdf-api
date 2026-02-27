@@ -1,19 +1,20 @@
 # LaTeX API
 
-A robust and secure LaTeX compilation API built with FastAPI.
+A robust and secure LaTeX compilation API built with FastAPI. Supports multi-file projects, zip uploads, and raw code compilation.
 
 ## Features
 
-- **Sync Compilation**: POST `/compile/sync` accepts:
-  - `.tex` files
-  - `.zip` projects
-  - Raw LaTeX code
+- **Multi-file Compilation** (v2): Upload multiple project files without zipping
+- **Zip Compilation**: Upload zip archives with mandatory `main_file`
+- **Raw Code Validation**: Check if LaTeX compiles without returning a PDF
 - **Security**:
-  - `-no-shell-escape` enforced.
-  - Dangerous TeX macros (e.g., `\write18`) blocked.
-  - File size limits (10MB).
-  - Timeouts (20s).
-- **Deployment**: Ready for Railway.
+  - `-no-shell-escape` enforced
+  - Dangerous TeX macros blocked (`\write18`, `\openout`, etc.)
+  - File path validation (traversal, absolute paths, backslashes, null bytes)
+  - File extension whitelist
+  - Upload size limit (20MB), file count limit (500)
+- **Observability**: Structured logging, `X-Request-Id` on every response
+- **Deployment**: Ready for Railway
 
 ## Quick Start
 
@@ -21,232 +22,253 @@ A robust and secure LaTeX compilation API built with FastAPI.
 
 1. Install dependencies:
    ```bash
-   pip install -r requirements.txt
+   pip install -e .
    ```
 2. Ensure `pdflatex` is installed (TeX Live).
-   - **macOS**: `brew install --cask mactex` (full) or `brew install basictex` (minimal).
-   - **Linux**: `sudo apt-get install texlive-latex-recommended texlive-latex-extra`.
-   - **Windows**: Install TeX Live or MiKTeX.
+   - **macOS**: `brew install --cask mactex` (full) or `brew install basictex` (minimal)
+   - **Linux**: `sudo apt-get install texlive-latex-recommended texlive-latex-extra`
+   - **Windows**: Install TeX Live or MiKTeX
 3. Start the app:
    ```bash
-   uvicorn app.main:create_app --reload
+   uvicorn app.main:app --reload
    ```
 
 ---
 
 ## API Documentation
 
-### Endpoints
+### Endpoints Overview
 
-#### Health Check
-
-Check if the API is running.
-
-| Method | Endpoint  | Description          |
-|--------|-----------|----------------------|
-| GET    | `/health` | Returns health status |
-
-**Response:**
-```json
-{
-  "status": "ok"
-}
-```
+| Method | Endpoint               | Description                              |
+|--------|------------------------|------------------------------------------|
+| GET    | `/health`              | Service health, version, available engines |
+| POST   | `/compile/sync`        | v1: Compile single file or code          |
+| POST   | `/compile/validate`    | v1: Validate code (JSON)                 |
+| POST   | `/v2/compile/sync`     | v2: Multi-file compile (multipart)       |
+| POST   | `/v2/compile/zip`      | v2: Zip compile (multipart)              |
+| POST   | `/v2/compile/validate` | v2: Validate code (JSON)                 |
 
 ---
 
-#### Compile LaTeX
-
-Compile LaTeX source code into a PDF.
-
-| Method | Endpoint        | Description                     |
-|--------|-----------------|--------------------------------|
-| POST   | `/compile/sync` | Synchronously compile LaTeX    |
-
-**Request Parameters (multipart/form-data):**
-
-| Parameter   | Type   | Required | Default    | Description                                      |
-|-------------|--------|----------|------------|--------------------------------------------------|
-| `file`      | File   | No*      | -          | A `.tex` file or `.zip` project                  |
-| `code`      | String | No*      | -          | Raw LaTeX source code                            |
-| `engine`    | String | No       | `pdflatex` | LaTeX engine to use                              |
-| `passes`    | Int    | No       | `2`        | Number of compilation passes                     |
-| `main_file` | String | No       | -          | Main `.tex` file in a zip project (auto-detected if not specified) |
-
-> *Either `file` or `code` must be provided.
-
-**Success Response:**
-
-- **Status:** `200 OK`
-- **Content-Type:** `application/pdf`
-- **Headers:**
-  - `Content-Disposition: attachment; filename="output.pdf"`
-  - `X-Compile-Time-Ms: <compilation time in milliseconds>`
-- **Body:** The compiled PDF file
-
-**Error Response:**
-
-- **Status:** `400 Bad Request`
-- **Content-Type:** `application/json`
-
-```json
-{
-  "status": "error",
-  "error_type": "latex_compile_error",
-  "message": "Undefined control sequence",
-  "log_truncated": false,
-  "log": "--- Pass 1 ---\n! Undefined control sequence.\nl.5 \\badcommand\n..."
-}
-```
-
-**Other Error Codes:**
-
-| Status | Description                                |
-|--------|--------------------------------------------|
-| `400`  | Missing input or unsupported file type     |
-| `413`  | File too large (max 10MB)                  |
-| `500`  | Internal server error                      |
-
----
-
-#### Validate LaTeX (no PDF)
-
-Check if LaTeX code compiles and return errors/warnings without streaming a PDF.
-
-| Method | Endpoint             | Description                     |
-|--------|----------------------|---------------------------------|
-| POST   | `/compile/validate`  | Validate LaTeX via JSON payload |
-
-**Request Body (application/json):**
-
-| Field     | Type   | Required | Default    | Description                         |
-|-----------|--------|----------|------------|-------------------------------------|
-| `code`    | String | Yes      | -          | Raw LaTeX source code               |
-| `passes`  | Int    | No       | `1`        | Number of compilation passes        |
-| `engine`  | String | No       | `pdflatex` | LaTeX engine (currently pdflatex)   |
-
-**Response:**
-
-- **Status:** `200 OK` (compilation success or failure is conveyed in the payload)
-- **Content-Type:** `application/json`
-
-```json
-{
-  "compilable": true,
-  "warnings": ["LaTeX Warning: Label(s) may have changed."],
-  "errors": [],
-  "log": "--- Pass 1 ---\\n...log output...",
-  "log_truncated": false,
-  "compile_time_ms": 120
-}
-```
-
-**Error Codes:**
-
-| Status | Description                      |
-|--------|----------------------------------|
-| `400`  | Missing/empty `code` field       |
-| `413`  | Code too large (max 10MB)        |
-
-**Example:**
-
-```bash
-curl -X POST "http://localhost:8000/compile/validate" \
-  -H "Content-Type: application/json" \
-  -d '{"code": "\\documentclass{article}\\begin{document}Hello\\end{document}"}'
-```
-
----
-
-### Usage Examples
-
-#### Health Check
+### Health Check
 
 ```bash
 curl http://localhost:8000/health
 ```
 
-#### Compile a `.tex` File
-
-```bash
-curl -X POST "http://localhost:8000/compile/sync" \
-  -F "file=@document.tex" \
-  --output output.pdf
-```
-
-#### Compile Raw LaTeX Code
-
-```bash
-curl -X POST "http://localhost:8000/compile/sync" \
-  -F "code=\documentclass{article}\begin{document}Hello World!\end{document}" \
-  --output output.pdf
-```
-
-#### Compile a Zip Project
-
-```bash
-curl -X POST "http://localhost:8000/compile/sync" \
-  -F "file=@project.zip" \
-  -F "main_file=main.tex" \
-  --output output.pdf
-```
-
-#### Compile with Custom Options
-
-```bash
-curl -X POST "http://localhost:8000/compile/sync" \
-  -F "file=@document.tex" \
-  -F "engine=pdflatex" \
-  -F "passes=3" \
-  --output output.pdf
-```
-
-#### JavaScript (fetch)
-
-```javascript
-const formData = new FormData();
-formData.append('code', '\\documentclass{article}\\begin{document}Hello!\\end{document}');
-
-const response = await fetch('https://your-api.com/compile/sync', {
-  method: 'POST',
-  body: formData
-});
-
-if (response.ok) {
-  const blob = await response.blob();
-  // Save or display the PDF
-} else {
-  const error = await response.json();
-  console.error(error.message);
+**Response:**
+```json
+{
+  "status": "ok",
+  "version": "2.0.0",
+  "engines": ["pdflatex"]
 }
 ```
 
-#### Python (requests)
+---
 
-```python
-import requests
+### V2 Endpoints
 
-# Compile raw code
-response = requests.post(
-    "https://your-api.com/compile/sync",
-    data={"code": r"\documentclass{article}\begin{document}Hello!\end{document}"}
-)
+#### POST `/v2/compile/sync` — Multi-file Compile
 
-if response.status_code == 200:
-    with open("output.pdf", "wb") as f:
-        f.write(response.content)
-else:
-    print(response.json())
+Upload individual project files as multipart form data. Each file's `filename` header is the project-relative path.
+
+**Parameters (multipart/form-data):**
+
+| Parameter   | Type     | Required | Default    | Description                          |
+|-------------|----------|----------|------------|--------------------------------------|
+| `main_file` | String   | Yes      | -          | Relative path to the main `.tex` file |
+| `files`     | File[]   | Yes      | -          | Project files (repeated field)       |
+| `engine`    | String   | No       | `pdflatex` | LaTeX engine                         |
+| `passes`    | Int      | No       | `2`        | Compilation passes (1–5)             |
+| `return`    | String   | No       | `pdf`      | Response format: `pdf` or `json`     |
+
+**Example:**
+
+```bash
+curl -X POST "http://localhost:8000/v2/compile/sync" \
+  -F "main_file=main.tex" \
+  -F "files=@main.tex" \
+  -F "files=@chapters/one.tex" \
+  -F "files=@figures/diagram.png" \
+  --output output.pdf
 ```
 
-```python
-# Compile a file
-with open("document.tex", "rb") as f:
-    response = requests.post(
-        "https://your-api.com/compile/sync",
-        files={"file": f}
-    )
+**Success (return=pdf):** `200 OK` with `application/pdf` body, `X-Compile-Time-Ms` header.
+
+**Success (return=json):**
+```json
+{
+  "status": "ok",
+  "pdf_base64": "JVBERi0xLjQg...",
+  "compile_time_ms": 1200,
+  "errors": [],
+  "warnings": [],
+  "log": "--- Pass 1 ---\n...",
+  "log_truncated": false
+}
 ```
+
+---
+
+#### POST `/v2/compile/zip` — Zip Compile
+
+Upload a zip archive containing the project. `main_file` is **required** (no auto-detection).
+
+**Parameters (multipart/form-data):**
+
+| Parameter   | Type   | Required | Default    | Description                          |
+|-------------|--------|----------|------------|--------------------------------------|
+| `file`      | File   | Yes      | -          | Zip archive                          |
+| `main_file` | String | Yes      | -          | Main `.tex` file path inside the zip |
+| `engine`    | String | No       | `pdflatex` | LaTeX engine                         |
+| `passes`    | Int    | No       | `2`        | Compilation passes (1–5)             |
+| `return`    | String | No       | `pdf`      | Response format: `pdf` or `json`     |
+
+**Example:**
+
+```bash
+curl -X POST "http://localhost:8000/v2/compile/zip" \
+  -F "file=@project.zip" \
+  -F "main_file=src/main.tex" \
+  --output output.pdf
+```
+
+---
+
+#### POST `/v2/compile/validate` — Validate Only
+
+Check if LaTeX code compiles without returning a PDF.
+
+**Request Body (application/json):**
+
+| Field    | Type   | Required | Default    | Description                      |
+|----------|--------|----------|------------|----------------------------------|
+| `code`   | String | Yes      | -          | Raw LaTeX source code            |
+| `passes` | Int    | No       | `1`        | Compilation passes (1–5)         |
+| `engine` | String | No       | `pdflatex` | LaTeX engine                     |
+
+**Example:**
+
+```bash
+curl -X POST "http://localhost:8000/v2/compile/validate" \
+  -H "Content-Type: application/json" \
+  -d '{"code": "\\documentclass{article}\\begin{document}Hello\\end{document}"}'
+```
+
+**Response:**
+```json
+{
+  "compilable": true,
+  "errors": [],
+  "warnings": [],
+  "log": "--- Pass 1 ---\n...",
+  "log_truncated": false,
+  "compile_time_ms": 850
+}
+```
+
+---
+
+### V2 Error Response Format
+
+All v2 endpoints return errors in a standardized format:
+
+```json
+{
+  "status": "error",
+  "error_type": "invalid_input",
+  "message": "File type not allowed: '.sh'",
+  "errors": [],
+  "warnings": [],
+  "log": "",
+  "log_truncated": false
+}
+```
+
+| `error_type`          | HTTP Status | Description                    |
+|-----------------------|-------------|--------------------------------|
+| `invalid_input`       | 422         | Bad paths, extensions, macros  |
+| `payload_too_large`   | 413         | Upload exceeds size/count limit|
+| `latex_compile_error` | 400         | LaTeX compilation failed       |
+| `timeout`             | 400         | Compilation timed out          |
+| `internal`            | 500         | Unexpected server error        |
+
+---
+
+### V1 Endpoints (Backward Compatible)
+
+The original v1 endpoints remain available and unchanged.
+
+#### POST `/compile/sync`
+
+| Parameter   | Type   | Required | Default    | Description                                       |
+|-------------|--------|----------|------------|---------------------------------------------------|
+| `file`      | File   | No*      | -          | A `.tex` file or `.zip` project                   |
+| `code`      | String | No*      | -          | Raw LaTeX source code                             |
+| `engine`    | String | No       | `pdflatex` | LaTeX engine                                      |
+| `passes`    | Int    | No       | `2`        | Compilation passes                                |
+| `main_file` | String | No       | -          | Main `.tex` file in a zip (auto-detected if omitted) |
+
+> *Either `file` or `code` must be provided.
+
+#### POST `/compile/validate`
+
+| Field    | Type   | Required | Default    | Description          |
+|----------|--------|----------|------------|----------------------|
+| `code`   | String | Yes      | -          | Raw LaTeX source     |
+| `passes` | Int    | No       | `1`        | Compilation passes   |
+| `engine` | String | No       | `pdflatex` | LaTeX engine         |
+
+---
+
+### Response Headers
+
+All responses include:
+
+| Header           | Description                                    |
+|------------------|------------------------------------------------|
+| `X-Request-Id`   | Unique request identifier (UUID or echoed)     |
+| `X-Compile-Time-Ms` | Compilation time in ms (success responses) |
+
+---
+
+## Security
+
+### File Validation
+
+- **Path rules**: No absolute paths, `..` traversal, backslashes, null bytes, or paths > 300 chars
+- **Extension whitelist**: `.tex`, `.bib`, `.bst`, `.cls`, `.sty`, `.png`, `.jpg`, `.jpeg`, `.pdf`, `.txt`, `.csv`, `.eps`, `.svg`
+- **Macro scanning**: `.tex`, `.sty`, `.cls` files are scanned for `\write18`, `\immediate\write18`, `\input|`, `\openout`, `\openin`, `\newwrite`, `\newread`
+
+### Resource Limits
+
+| Limit              | Value  |
+|--------------------|--------|
+| Max upload size    | 20 MB  |
+| Max file count     | 500    |
+| Max passes         | 5      |
+| Max log size       | 64 KB  |
+| Max path length    | 300    |
+| Compile timeout    | 20s    |
+
+---
+
+## Configuration
+
+Environment variables (see `app/core/config.py`):
+
+| Variable          | Default    | Description                      |
+|-------------------|------------|----------------------------------|
+| `TIMEOUT_SECONDS` | `20`       | Compilation timeout in seconds   |
+| `MAX_UPLOAD_SIZE` | `20971520` | Maximum upload size in bytes     |
+| `MAX_FILE_COUNT`  | `500`      | Maximum files per request        |
+| `MAX_PASSES`      | `5`        | Maximum compilation passes       |
+| `MAX_LOG_SIZE`    | `65536`    | Maximum log size in bytes        |
+| `MAX_PATH_LENGTH` | `300`      | Maximum file path length         |
+| `TEX_BIN_PATH`    | `pdflatex` | Path to the LaTeX binary         |
+| `LOG_FORMAT`      | `text`     | Log format: `text` or `json`     |
+| `LOG_LEVEL`       | `INFO`     | Log level                        |
 
 ---
 
@@ -257,12 +279,13 @@ with open("document.tex", "rb") as f:
 3. Railway will automatically detect `railpack.json` and install Python + TeX Live.
 4. The start command is defined in `railpack.json`.
 
-## Configuration
+---
 
-Environment variables (see `app/core/config.py`):
+## Running Tests
 
-| Variable          | Default | Description                      |
-|-------------------|---------|----------------------------------|
-| `TIMEOUT_SECONDS` | `20`    | Compilation timeout in seconds   |
-| `MAX_UPLOAD_SIZE` | `10MB`  | Maximum file upload size         |
-| `TEX_BIN_PATH`    | `pdflatex` | Path to the LaTeX binary      |
+```bash
+pip install -e .
+python -m pytest tests/ -v
+```
+
+Tests that require `pdflatex` are automatically skipped if it is not installed.

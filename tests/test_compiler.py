@@ -1,163 +1,190 @@
+"""
+Unit tests for the compilation service (v1 interface).
+
+These tests exercise compile_latex_sync() and the underlying pipeline by
+mocking file I/O and subprocess calls.
+"""
+
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, mock_open
 from pathlib import Path
 from app.services.latex_compiler import compile_latex_sync
 from app.models.compile import CompileOptions
 
+
 @pytest.fixture
 def mock_subprocess():
-    with patch("subprocess.run") as mock:
+    with patch("app.services.pipeline.subprocess.run") as mock:
         yield mock
+
 
 @pytest.fixture
-def mock_temp_dir():
-    with patch("tempfile.mkdtemp") as mock:
-        mock.return_value = "/tmp/mock_latex_job"
-        yield mock
+def mock_workdir(tmp_path):
+    """Patch create_workdir to return a real tmp_path and track cleanup."""
+    with patch("app.services.latex_compiler.create_workdir") as mock_create:
+        mock_create.return_value = tmp_path
+        yield tmp_path
 
-@pytest.fixture
-def mock_shutil():
-    with patch("shutil.copy") as mock:
-        yield mock
 
-def test_compile_success(mock_subprocess, mock_shutil):
-    # Setup mock to return success
+def _write_tex_source(
+    tmp_path, content=b"\\documentclass{article}\\begin{document}Hello\\end{document}"
+):
+    """Helper: write a .tex source file for compile_latex_sync to read."""
+    src = tmp_path / "source.tex"
+    src.write_bytes(content)
+    return src
+
+
+# --- Success / Failure ---
+
+
+def test_compile_success(mock_workdir, mock_subprocess):
     process_mock = MagicMock()
     process_mock.returncode = 0
     process_mock.stdout = "Output log"
     mock_subprocess.return_value = process_mock
-    
-    # Mock file existence for PDF check
-    with patch("pathlib.Path.exists") as mock_exists:
-        mock_exists.return_value = True
-        
-        options = CompileOptions(passes=1)
-        # We need a dummy file path that "exists" for the initial check in the service if we added one
-        # The service checks source_file_path.suffix
-        
-        result = compile_latex_sync(Path("dummy.tex"), options)
-        
-        assert result.success is True
-        assert result.log == "--- Pass 1 ---\nOutput log"
-        assert result.pdf_path is not None
-        assert result.warnings == []
-        assert result.errors == []
 
-def test_compile_failure(mock_subprocess, mock_shutil):
-    # Setup mock to return failure
+    # Write a real source file
+    src = _write_tex_source(mock_workdir.parent)
+
+    # The pipeline will look for the PDF after compilation.
+    # Simulate pdflatex creating main.pdf in work_dir.
+    (mock_workdir / "main.pdf").write_bytes(b"%PDF-1.4 fake")
+
+    options = CompileOptions(passes=1)
+    result = compile_latex_sync(src, options)
+
+    assert result.success is True
+    assert "--- Pass 1 ---" in result.log
+    assert "Output log" in result.log
+    assert result.pdf_path is not None
+    assert result.warnings == []
+    assert result.errors == []
+
+
+def test_compile_failure(mock_workdir, mock_subprocess):
     process_mock = MagicMock()
     process_mock.returncode = 1
     process_mock.stdout = "Error log"
     mock_subprocess.return_value = process_mock
-    
-    with patch("pathlib.Path.exists") as mock_exists:
-        mock_exists.return_value = False
-        
-        options = CompileOptions(passes=1)
-        result = compile_latex_sync(Path("dummy.tex"), options)
-        
-        assert result.success is False
-        assert "Error log" in result.log
 
-def test_error_parsing(mock_subprocess, mock_shutil):
-    # Setup mock to return failure with specific LaTeX error
+    src = _write_tex_source(mock_workdir.parent)
+
+    options = CompileOptions(passes=1)
+    result = compile_latex_sync(src, options)
+
+    assert result.success is False
+    assert "Error log" in result.log
+
+
+# --- Log parsing ---
+
+
+def test_error_parsing(mock_workdir, mock_subprocess):
     process_mock = MagicMock()
     process_mock.returncode = 1
     process_mock.stdout = "This is pdfTeX...\n! Undefined control sequence.\nl.10 \\foo"
     mock_subprocess.return_value = process_mock
-    
-    with patch("pathlib.Path.exists") as mock_exists:
-        mock_exists.return_value = False
-        
-        options = CompileOptions(passes=1)
-        result = compile_latex_sync(Path("dummy.tex"), options)
-        
-        assert result.success is False
-        assert result.error_message == "Undefined control sequence."
-        assert "Undefined control sequence." in result.errors
 
-def test_warning_parsing(mock_subprocess, mock_shutil):
-    # Setup mock to return success with a warning in the log
+    src = _write_tex_source(mock_workdir.parent)
+
+    options = CompileOptions(passes=1)
+    result = compile_latex_sync(src, options)
+
+    assert result.success is False
+    assert result.error_message == "Undefined control sequence."
+    assert "Undefined control sequence." in result.errors
+
+
+def test_warning_parsing(mock_workdir, mock_subprocess):
     process_mock = MagicMock()
     process_mock.returncode = 0
     process_mock.stdout = "LaTeX Warning: Label(s) may have changed.\n"
     mock_subprocess.return_value = process_mock
 
-    with patch("pathlib.Path.exists") as mock_exists:
-        mock_exists.return_value = True
+    src = _write_tex_source(mock_workdir.parent)
+    # Simulate successful PDF creation
+    (mock_workdir / "main.pdf").write_bytes(b"%PDF-1.4 fake")
 
-        options = CompileOptions(passes=1)
-        result = compile_latex_sync(Path("dummy.tex"), options)
+    options = CompileOptions(passes=1)
+    result = compile_latex_sync(src, options)
 
-        assert result.success is True
-        assert "LaTeX Warning: Label(s) may have changed." in result.warnings
+    assert result.success is True
+    assert "LaTeX Warning: Label(s) may have changed." in result.warnings
 
-def test_dangerous_macro(mock_subprocess, mock_shutil):
-    # Setup mock to return success (should not be reached)
-    process_mock = MagicMock()
-    mock_subprocess.return_value = process_mock
-    
-    with patch("pathlib.Path.read_text") as mock_read:
-        # Simulate dangerous content
-        mock_read.return_value = r"\documentclass{article}\begin{document}\write18{rm -rf /}\end{document}"
-        
-        options = CompileOptions(passes=1)
-        
-        # The service catches exceptions and returns a result
-        result = compile_latex_sync(Path("evil.tex"), options)
-        
-        assert result.success is False
-        assert "Dangerous macro detected" in result.log
 
-def test_missing_pdflatex(mock_subprocess, mock_shutil):
-    # Setup mock to raise FileNotFoundError
-    mock_subprocess.side_effect = FileNotFoundError
-    
-    with patch("pathlib.Path.exists") as mock_exists:
-        mock_exists.return_value = False
-        
-        options = CompileOptions(passes=1)
-        result = compile_latex_sync(Path("dummy.tex"), options)
-        
-        assert result.success is False
-        assert "pdflatex binary not found" in result.error_message
+# --- Security ---
 
-def test_compile_zip_success(mock_subprocess):
-    # Setup mock to return success
+
+def test_dangerous_macro(mock_workdir, mock_subprocess):
+    src = _write_tex_source(
+        mock_workdir.parent,
+        content=rb"\documentclass{article}\begin{document}\write18{rm -rf /}\end{document}",
+    )
+
+    options = CompileOptions(passes=1)
+    result = compile_latex_sync(src, options)
+
+    assert result.success is False
+    assert "Dangerous macro detected" in result.log
+
+
+# --- Edge cases ---
+
+
+def test_missing_pdflatex(mock_workdir, mock_subprocess):
+    import subprocess as _subprocess
+
+    mock_subprocess.side_effect = FileNotFoundError("pdflatex not found")
+
+    src = _write_tex_source(mock_workdir.parent)
+
+    options = CompileOptions(passes=1)
+    result = compile_latex_sync(src, options)
+
+    assert result.success is False
+    assert "pdflatex binary not found" in result.error_message
+
+
+def test_compile_zip_success(mock_workdir, mock_subprocess, tmp_path):
+    """Test that a valid zip file is extracted and compiled."""
+    import zipfile
+
+    # Create a real zip with main.tex
+    zip_path = tmp_path / "project.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr(
+            "main.tex", r"\documentclass{article}\begin{document}Hello\end{document}"
+        )
+        zf.writestr("image.png", b"\x89PNG fake image data")
+
     process_mock = MagicMock()
     process_mock.returncode = 0
     process_mock.stdout = "Output log"
     mock_subprocess.return_value = process_mock
-    
-    with patch("zipfile.ZipFile") as mock_zip:
-        mock_zip_instance = MagicMock()
-        mock_zip.return_value.__enter__.return_value = mock_zip_instance
-        # Mock namelist to return safe paths
-        mock_zip_instance.namelist.return_value = ["main.tex", "image.png"]
-        
-        with patch("pathlib.Path.exists") as mock_exists:
-            # We need to handle multiple exists calls:
-            # 1. work_dir / "main.tex" -> True (heuristic)
-            # 2. expected_pdf -> True
-            mock_exists.side_effect = [True, True, True, True] 
-            
-            options = CompileOptions(passes=1)
-            result = compile_latex_sync(Path("project.zip"), options)
-            
-            assert result.success is True
-            mock_zip_instance.extractall.assert_called_once()
 
-def test_compile_zip_unsafe_path(mock_subprocess):
-    with patch("zipfile.ZipFile") as mock_zip:
-        mock_zip_instance = MagicMock()
-        mock_zip.return_value.__enter__.return_value = mock_zip_instance
-        # Mock namelist to return UNSAFE paths
-        mock_zip_instance.namelist.return_value = ["../evil.tex"]
-        
-        options = CompileOptions(passes=1)
-        
-        # The service catches exceptions and returns a result
-        result = compile_latex_sync(Path("project.zip"), options)
-        
-        assert result.success is False
-        assert "Invalid path in zip" in result.log
+    # Simulate pdflatex creating main.pdf
+    (mock_workdir / "main.pdf").write_bytes(b"%PDF-1.4 fake")
+
+    options = CompileOptions(passes=1)
+    result = compile_latex_sync(zip_path, options)
+
+    assert result.success is True
+    mock_subprocess.assert_called_once()
+
+
+def test_compile_zip_unsafe_path(mock_workdir, mock_subprocess, tmp_path):
+    """Test that zip files with path traversal are rejected."""
+    import zipfile
+
+    zip_path = tmp_path / "evil.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr(
+            "../evil.tex", r"\documentclass{article}\begin{document}Evil\end{document}"
+        )
+
+    options = CompileOptions(passes=1)
+    result = compile_latex_sync(zip_path, options)
+
+    assert result.success is False
+    assert "Invalid path in zip" in result.log

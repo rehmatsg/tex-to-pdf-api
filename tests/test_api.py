@@ -6,10 +6,17 @@ from pathlib import Path
 
 client = TestClient(app)
 
+
 def test_health():
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json()["status"] == "ok"
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["version"] == "2.0.0"
+    assert isinstance(body["engines"], list)
+    # "tex_available" removed in v2 — replaced by "engines" list
+    assert "tex_available" not in body
+
 
 @patch("app.api.routes_compile.compile_latex_sync")
 def test_compile_sync_file(mock_compile):
@@ -20,22 +27,22 @@ def test_compile_sync_file(mock_compile):
     mock_pdf_path = MagicMock()
     mock_pdf_path.exists.return_value = True
     mock_result.pdf_path = mock_pdf_path
-    
+
     mock_result.compile_time_ms = 100
     mock_compile.return_value = mock_result
-    
+
     # Mock file open
     # We need to mock open() because the route tries to open result.pdf_path
     with patch("builtins.open", create=True) as mock_open:
         mock_open.return_value.__enter__.return_value.read.return_value = b"PDF CONTENT"
-        
+
         response = client.post(
-            "/compile/sync",
-            files={"file": ("test.tex", b"content", "text/plain")}
+            "/compile/sync", files={"file": ("test.tex", b"content", "text/plain")}
         )
-        
+
         assert response.status_code == 200
         assert response.content == b"PDF CONTENT"
+
 
 @patch("app.api.routes_compile.compile_latex_sync")
 def test_compile_sync_code(mock_compile):
@@ -46,25 +53,26 @@ def test_compile_sync_code(mock_compile):
     mock_pdf_path = MagicMock()
     mock_pdf_path.exists.return_value = True
     mock_result.pdf_path = mock_pdf_path
-    
+
     mock_result.compile_time_ms = 100
     mock_compile.return_value = mock_result
-    
+
     with patch("builtins.open", create=True) as mock_open:
         mock_open.return_value.__enter__.return_value.read.return_value = b"PDF CONTENT"
-        
+
         response = client.post(
-            "/compile/sync",
-            data={"code": r"\documentclass{article}..."}
+            "/compile/sync", data={"code": r"\documentclass{article}..."}
         )
-        
+
         assert response.status_code == 200
         assert response.content == b"PDF CONTENT"
+
 
 def test_compile_sync_missing_input():
     response = client.post("/compile/sync")
     assert response.status_code == 400
     assert "Either 'file' or 'code'" in response.json()["detail"]
+
 
 @patch("app.api.routes_compile.compile_latex_sync")
 def test_validate_success(mock_compile):
@@ -91,6 +99,7 @@ def test_validate_success(mock_compile):
     assert body["warnings"] == ["LaTeX Warning: Something minor"]
     assert body["errors"] == []
 
+
 @patch("app.api.routes_compile.compile_latex_sync")
 def test_validate_failure(mock_compile):
     mock_result = CompileResult(
@@ -107,13 +116,16 @@ def test_validate_failure(mock_compile):
 
     response = client.post(
         "/compile/validate",
-        json={"code": r"\documentclass{article}\begin{document}\unknowncmd\end{document}"},
+        json={
+            "code": r"\documentclass{article}\begin{document}\unknowncmd\end{document}"
+        },
     )
 
     assert response.status_code == 200
     body = response.json()
     assert body["compilable"] is False
     assert "Undefined control sequence." in body["errors"][0]
+
 
 def test_validate_missing_code():
     response = client.post("/compile/validate", json={"code": ""})
