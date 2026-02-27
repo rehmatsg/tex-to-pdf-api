@@ -7,6 +7,7 @@ Endpoints:
     POST /v2/compile/validate  Validation-only (JSON body)
 """
 
+import base64
 import logging
 import os
 import tempfile
@@ -20,6 +21,7 @@ from app.core.config import settings
 from app.core.logging import log_compile_event
 from app.models.compile import (
     CompileOptions,
+    CompileResult,
     ErrorResponse,
     ValidateRequest,
     ValidateResponse,
@@ -76,6 +78,59 @@ def _validation_error(exc: ValidationError) -> JSONResponse:
     return _compile_error_response(422, exc.error_type, exc.message)
 
 
+def _build_compile_response(
+    result: CompileResult,
+    return_format: str,
+) -> Response | JSONResponse:
+    """
+    Build the HTTP response from a CompileResult.
+
+    On success returns PDF (binary or base64-in-JSON).
+    On failure returns a standardized error response.
+    """
+    if result.success and result.pdf_path and result.pdf_path.exists():
+        if return_format == "json":
+            pdf_b64 = base64.b64encode(result.pdf_path.read_bytes()).decode("ascii")
+            return JSONResponse(
+                content={
+                    "status": "ok",
+                    "pdf_base64": pdf_b64,
+                    "compile_time_ms": result.compile_time_ms,
+                    "errors": result.errors,
+                    "warnings": result.warnings,
+                    "log": result.log,
+                    "log_truncated": result.log_truncated,
+                }
+            )
+
+        # default: return raw PDF
+        pdf_bytes = result.pdf_path.read_bytes()
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": 'attachment; filename="output.pdf"',
+                "X-Compile-Time-Ms": str(result.compile_time_ms),
+            },
+        )
+
+    # compile failed
+    error_type = (
+        "timeout"
+        if "timed out" in (result.error_message or "")
+        else "latex_compile_error"
+    )
+    return _compile_error_response(
+        400,
+        error_type,
+        result.error_message or "Compilation failed",
+        errors=result.errors,
+        warnings=result.warnings,
+        log=result.log,
+        log_truncated=result.log_truncated,
+    )
+
+
 # ---------------------------------------------------------------------------
 # POST /v2/compile/sync  —  multi-file compile
 # ---------------------------------------------------------------------------
@@ -112,6 +167,14 @@ async def compile_sync_multifile(
         )
         return _compile_error_response(
             422, "invalid_input", f"Unsupported engine: {engine!r}"
+        )
+
+    # --- return format guard ---
+    if return_format not in ("pdf", "json"):
+        return _compile_error_response(
+            422,
+            "invalid_input",
+            f"Unsupported return format: {return_format!r}. Must be 'pdf' or 'json'.",
         )
 
     work_dir = create_workdir()
@@ -183,49 +246,7 @@ async def compile_sync_multifile(
         )
 
         # --- build response ---
-        if result.success and result.pdf_path and result.pdf_path.exists():
-            if return_format == "json":
-                import base64
-
-                pdf_b64 = base64.b64encode(result.pdf_path.read_bytes()).decode("ascii")
-                return JSONResponse(
-                    content={
-                        "status": "ok",
-                        "pdf_base64": pdf_b64,
-                        "compile_time_ms": result.compile_time_ms,
-                        "errors": result.errors,
-                        "warnings": result.warnings,
-                        "log": result.log,
-                        "log_truncated": result.log_truncated,
-                    }
-                )
-
-            # default: return raw PDF
-            pdf_bytes = result.pdf_path.read_bytes()
-            return Response(
-                content=pdf_bytes,
-                media_type="application/pdf",
-                headers={
-                    "Content-Disposition": 'attachment; filename="output.pdf"',
-                    "X-Compile-Time-Ms": str(result.compile_time_ms),
-                },
-            )
-
-        # compile failed
-        error_type = (
-            "timeout"
-            if "timed out" in (result.error_message or "")
-            else "latex_compile_error"
-        )
-        return _compile_error_response(
-            400,
-            error_type,
-            result.error_message or "Compilation failed",
-            errors=result.errors,
-            warnings=result.warnings,
-            log=result.log,
-            log_truncated=result.log_truncated,
-        )
+        return _build_compile_response(result, return_format)
 
     finally:
         cleanup_workdir(work_dir)
@@ -267,6 +288,14 @@ async def compile_zip(
         )
         return _compile_error_response(
             422, "invalid_input", f"Unsupported engine: {engine!r}"
+        )
+
+    # --- return format guard ---
+    if return_format not in ("pdf", "json"):
+        return _compile_error_response(
+            422,
+            "invalid_input",
+            f"Unsupported return format: {return_format!r}. Must be 'pdf' or 'json'.",
         )
 
     # --- stream upload to a temp file, enforcing size ---
@@ -373,47 +402,7 @@ async def compile_zip(
         )
 
         # --- build response ---
-        if result.success and result.pdf_path and result.pdf_path.exists():
-            if return_format == "json":
-                import base64
-
-                pdf_b64 = base64.b64encode(result.pdf_path.read_bytes()).decode("ascii")
-                return JSONResponse(
-                    content={
-                        "status": "ok",
-                        "pdf_base64": pdf_b64,
-                        "compile_time_ms": result.compile_time_ms,
-                        "errors": result.errors,
-                        "warnings": result.warnings,
-                        "log": result.log,
-                        "log_truncated": result.log_truncated,
-                    }
-                )
-
-            pdf_bytes = result.pdf_path.read_bytes()
-            return Response(
-                content=pdf_bytes,
-                media_type="application/pdf",
-                headers={
-                    "Content-Disposition": 'attachment; filename="output.pdf"',
-                    "X-Compile-Time-Ms": str(result.compile_time_ms),
-                },
-            )
-
-        error_type = (
-            "timeout"
-            if "timed out" in (result.error_message or "")
-            else "latex_compile_error"
-        )
-        return _compile_error_response(
-            400,
-            error_type,
-            result.error_message or "Compilation failed",
-            errors=result.errors,
-            warnings=result.warnings,
-            log=result.log,
-            log_truncated=result.log_truncated,
-        )
+        return _build_compile_response(result, return_format)
 
     finally:
         cleanup_workdir(work_dir)
@@ -426,7 +415,10 @@ async def compile_zip(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/compile/validate", response_model=ValidateResponse)
+# No response_model here: the endpoint can return either ValidateResponse
+# (success) or a JSONResponse error, so a single response_model would cause
+# FastAPI to attempt serialization of error responses through the schema.
+@router.post("/compile/validate")
 async def validate_compile(payload: ValidateRequest, request: Request):
     """
     Validate whether LaTeX code compiles, without returning a PDF.

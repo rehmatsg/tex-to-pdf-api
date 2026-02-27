@@ -55,7 +55,8 @@ async def build_workdir_from_multipart(
     if not files:
         raise ValidationError("No files provided")
 
-    # Pre-validate file count + passes (total_bytes checked incrementally)
+    # Pre-validate file count + passes (total_bytes=0: cumulative size is
+    # checked incrementally as each file is read in the loop below)
     validate_limits(file_count=len(files), total_bytes=0, passes=passes)
 
     total_bytes = 0
@@ -116,6 +117,8 @@ def build_workdir_from_zip(
         # --- validate member count ---
         # Filter out directory entries (they end with '/')
         file_members = [m for m in members if not m.filename.endswith("/")]
+        # total_bytes=0 here: we only check file count + passes at this point.
+        # The cumulative size limit is enforced incrementally in the loop below.
         validate_limits(file_count=len(file_members), total_bytes=0, passes=passes)
 
         total_bytes = 0

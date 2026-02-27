@@ -8,15 +8,13 @@ The work directory is now tracked and returned alongside the result so callers
 can guarantee cleanup.
 """
 
-import shutil
 import time
-import zipfile
 from pathlib import Path
-from typing import Optional, Tuple, List
+from typing import Optional
 
-from app.core.config import settings
 from app.models.compile import CompileOptions, CompileResult
-from app.services.pipeline import compile_project, _parse_log_messages
+from app.services.adapters import build_workdir_from_zip
+from app.services.pipeline import compile_project
 from app.services.validators import scan_dangerous_macros, ValidationError
 from app.services.workdir import create_workdir, cleanup_workdir, safe_write_file
 
@@ -61,6 +59,9 @@ def compile_latex_sync(
             )
 
         result = compile_project(work_dir, main_file, options)
+
+        # Store work_dir on result so cleanup_work_dir can find it reliably
+        result.work_dir = work_dir
 
         # If compilation failed, clean up immediately since there's no PDF
         # to return.
@@ -109,12 +110,15 @@ def cleanup_work_dir(result: CompileResult) -> None:
     """
     Clean up the work directory associated with a CompileResult.
 
-    Safe to call even if pdf_path is None or the directory doesn't exist.
+    Safe to call even if work_dir/pdf_path is None or the directory doesn't exist.
     """
+    # Prefer the explicit work_dir field
+    if result.work_dir is not None:
+        cleanup_workdir(result.work_dir)
+        return
+
+    # Fallback: infer from pdf_path (legacy results without work_dir)
     if result.pdf_path is not None:
-        # pdf_path is something like /tmp/latex_job_xxx/main.pdf
-        # The work dir is its parent (or grandparent for nested main files).
-        # Walk up to find the latex_job_ directory.
         work_dir = result.pdf_path
         while work_dir.name and not work_dir.name.startswith("latex_job_"):
             work_dir = work_dir.parent
@@ -156,24 +160,15 @@ def _setup_from_zip(
     work_dir: Path,
     options: CompileOptions,
 ) -> str:
-    """Extract a zip file into work_dir, scanning for dangerous content."""
-    with zipfile.ZipFile(source_file_path, "r") as zip_ref:
-        # Security: validate all paths before extracting
-        for member in zip_ref.namelist():
-            if member.startswith("/") or ".." in member:
-                raise ValueError(f"Invalid path in zip: {member}")
+    """
+    Extract a zip file into work_dir using the shared v2 adapter.
 
-        zip_ref.extractall(work_dir)
+    Delegates to build_workdir_from_zip so v1 and v2 have identical security
+    enforcement and consistent error types (ValidationError / PayloadTooLargeError).
+    """
+    build_workdir_from_zip(source_file_path, work_dir, options.passes)
 
-    # Scan all scannable files for dangerous macros
-    for tex_file in work_dir.rglob("*.tex"):
-        scan_dangerous_macros(tex_file.read_bytes(), tex_file.name)
-    for sty_file in work_dir.rglob("*.sty"):
-        scan_dangerous_macros(sty_file.read_bytes(), sty_file.name)
-    for cls_file in work_dir.rglob("*.cls"):
-        scan_dangerous_macros(cls_file.read_bytes(), cls_file.name)
-
-    # Determine main file
+    # Determine main file after extraction
     main_file = _determine_main_file(work_dir, options)
     return main_file
 

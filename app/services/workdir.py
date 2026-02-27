@@ -63,8 +63,7 @@ def safe_write_file(work_dir: Path, relative_path: str, content: bytes) -> Path:
     # Create parent directories
     dest.parent.mkdir(parents=True, exist_ok=True)
 
-    # Write file -- use 'xb' (exclusive create) to avoid overwriting via race
-    # If file already exists (duplicate path), overwrite is acceptable here
+    # Write file contents (overwrites if file already exists from duplicate path)
     dest.write_bytes(content)
 
     return dest

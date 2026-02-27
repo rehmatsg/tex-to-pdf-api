@@ -187,4 +187,4 @@ def test_compile_zip_unsafe_path(mock_workdir, mock_subprocess, tmp_path):
     result = compile_latex_sync(zip_path, options)
 
     assert result.success is False
-    assert "Invalid path in zip" in result.log
+    assert ".." in result.log

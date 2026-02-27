@@ -12,6 +12,7 @@ This module provides the single `compile_project()` function that all endpoints
 """
 
 import logging
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -21,6 +22,9 @@ from app.core.config import settings
 from app.models.compile import CompileOptions, CompileResult
 
 logger = logging.getLogger(__name__)
+
+# Pre-compiled regex for -file-line-error format: ./file.tex:123: Error message
+_FILE_LINE_RE = re.compile(r"^\./[^:]+:\d+:\s+(.+)")
 
 
 def compile_project(
@@ -175,19 +179,15 @@ def _parse_log_messages(log: str) -> tuple[list[str], list[str]]:
 
     Returns (errors, warnings).
     """
-    import re
-
     errors: list[str] = []
     warnings: list[str] = []
-    # Pattern for -file-line-error format: ./file.tex:123: Error message
-    file_line_re = re.compile(r"^\./[^:]+:\d+:\s+(.+)")
 
     for line in log.splitlines():
         stripped = line.strip()
         if stripped.startswith("! "):
             errors.append(stripped[2:].strip())
         else:
-            m = file_line_re.match(stripped)
+            m = _FILE_LINE_RE.match(stripped)
             if m:
                 msg = m.group(1).strip()
                 # Skip meta-lines like "==> Fatal error occurred..."

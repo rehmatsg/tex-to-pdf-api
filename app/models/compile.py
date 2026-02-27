@@ -17,6 +17,7 @@ class CompileResult(BaseModel):
 
     success: bool
     pdf_path: Optional[Path] = None
+    work_dir: Optional[Path] = None
     compile_time_ms: int
     log: str
     error_message: Optional[str] = None

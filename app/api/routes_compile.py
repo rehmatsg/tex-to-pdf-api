@@ -26,6 +26,13 @@ async def compile_sync(
             status_code=400, detail="Either 'file' or 'code' must be provided"
         )
 
+    # Validate passes against MAX_PASSES
+    if not (1 <= passes <= settings.MAX_PASSES):
+        raise HTTPException(
+            status_code=422,
+            detail=f"passes must be between 1 and {settings.MAX_PASSES}, got {passes}",
+        )
+
     # Create options
     options = CompileOptions(
         engine=engine,  # type: ignore[arg-type]
