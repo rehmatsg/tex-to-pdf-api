@@ -105,7 +105,35 @@ curl -X POST "http://localhost:8000/v2/compile/sync" \
   "errors": [],
   "warnings": [],
   "log": "--- Pass 1 ---\n...",
-  "log_truncated": false
+  "log_truncated": false,
+  "textcount": {
+    "status": "ok",
+    "message": null,
+    "totals": {
+      "words_total": 12,
+      "words_text": 10,
+      "words_headers": 2,
+      "words_captions": 0,
+      "headings": 1,
+      "floats": 0,
+      "math_inline": 0,
+      "math_display": 0
+    },
+    "files": [
+      {
+        "path": "main.tex",
+        "role": "main",
+        "words_total": 12,
+        "words_text": 10,
+        "words_headers": 2,
+        "words_captions": 0,
+        "headings": 1,
+        "floats": 0,
+        "math_inline": 0,
+        "math_display": 0
+      }
+    ]
+  }
 }
 ```
 
@@ -267,6 +295,8 @@ Environment variables (see `app/core/config.py`):
 | `MAX_LOG_SIZE`    | `65536`    | Maximum log size in bytes        |
 | `MAX_PATH_LENGTH` | `300`      | Maximum file path length         |
 | `TEX_BIN_PATH`    | `pdflatex` | Path to the LaTeX binary         |
+| `TEXTCOUNT_BIN_PATH` | `texcount` | Path to the texcount binary    |
+| `TEXTCOUNT_TIMEOUT_SECONDS` | `5` | Timeout for texcount subprocesses (seconds) |
 | `LOG_FORMAT`      | `text`     | Log format: `text` or `json`     |
 | `LOG_LEVEL`       | `INFO`     | Log level                        |
 

@@ -181,7 +181,35 @@ Upload individual project files as multipart form data. Each file's `filename` h
   "errors": [],
   "warnings": ["LaTeX Warning: Label(s) may have changed."],
   "log": "--- Pass 1 ---\nThis is pdfTeX...",
-  "log_truncated": false
+  "log_truncated": false,
+  "textcount": {
+    "status": "ok",
+    "message": null,
+    "totals": {
+      "words_total": 12,
+      "words_text": 10,
+      "words_headers": 2,
+      "words_captions": 0,
+      "headings": 1,
+      "floats": 0,
+      "math_inline": 0,
+      "math_display": 0
+    },
+    "files": [
+      {
+        "path": "main.tex",
+        "role": "main",
+        "words_total": 12,
+        "words_text": 10,
+        "words_headers": 2,
+        "words_captions": 0,
+        "headings": 1,
+        "floats": 0,
+        "math_inline": 0,
+        "math_display": 0
+      }
+    ]
+  }
 }
 ```
 
@@ -344,9 +372,30 @@ Compile endpoints can return two formats depending on the `return` parameter (v2
   "errors": [],
   "warnings": [],
   "log": "--- Pass 1 ---\n...",
-  "log_truncated": false
+  "log_truncated": false,
+  "textcount": {
+    "status": "ok",
+    "message": null,
+    "totals": {
+      "words_total": 12,
+      "words_text": 10,
+      "words_headers": 2,
+      "words_captions": 0,
+      "headings": 1,
+      "floats": 0,
+      "math_inline": 0,
+      "math_display": 0
+    },
+    "files": []
+  }
 }
 ```
+
+`textcount.status` values:
+- `ok`: summary and file breakdown parsed successfully.
+- `partial`: summary parsed, but per-file breakdown failed.
+- `unavailable`: `texcount` binary is missing.
+- `error`: summary generation or parsing failed.
 
 ### Error Responses
 
@@ -486,6 +535,8 @@ All settings can be overridden via environment variables or a `.env` file in the
 | `PROJECT_NAME`     | string  | `LaTeX API`  | Application name (shown in OpenAPI docs) |
 | `TIMEOUT_SECONDS`  | integer | `20`         | Compilation timeout in seconds |
 | `TEX_BIN_PATH`     | string  | `pdflatex`   | Path to the pdflatex binary (or just the name if it's on PATH) |
+| `TEXTCOUNT_BIN_PATH` | string | `texcount` | Path to the texcount binary (or just the name if it's on PATH) |
+| `TEXTCOUNT_TIMEOUT_SECONDS` | integer | `5` | Timeout in seconds for texcount subprocess calls |
 | `MAX_UPLOAD_SIZE`  | integer | `20971520`   | Maximum upload size in bytes (20 MB) |
 | `MAX_FILE_COUNT`   | integer | `500`        | Maximum files per request |
 | `MAX_PASSES`       | integer | `5`          | Maximum compilation passes |

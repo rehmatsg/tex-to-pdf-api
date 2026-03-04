@@ -123,6 +123,10 @@ class TestV2CompileSync:
         assert isinstance(body["errors"], list)
         assert isinstance(body["warnings"], list)
         assert "log" in body
+        assert "textcount" in body
+        assert body["textcount"]["status"] in ("ok", "partial", "unavailable", "error")
+        assert isinstance(body["textcount"]["totals"], dict)
+        assert isinstance(body["textcount"]["files"], list)
 
     def test_compile_error_returns_400(self):
         """Test 7: Compile error returns 400 with structured error."""
@@ -219,6 +223,8 @@ class TestV2CompileZip:
         body = r.json()
         assert body["status"] == "ok"
         assert "pdf_base64" in body
+        assert "textcount" in body
+        assert body["textcount"]["status"] in ("ok", "partial", "unavailable", "error")
 
 
 # =====================================================================

@@ -1,6 +1,7 @@
-from pydantic import BaseModel, Field
-from typing import Optional, Literal, List
 from pathlib import Path
+from typing import List, Literal, Optional
+
+from pydantic import BaseModel, Field
 
 
 class CompileOptions(BaseModel):
@@ -24,6 +25,43 @@ class CompileResult(BaseModel):
     log_truncated: bool = False
     warnings: List[str] = Field(default_factory=list)
     errors: List[str] = Field(default_factory=list)
+
+
+class TextCountTotals(BaseModel):
+    """Word-count totals extracted from texcount."""
+
+    words_total: int = 0
+    words_text: int = 0
+    words_headers: int = 0
+    words_captions: int = 0
+    headings: int = 0
+    floats: int = 0
+    math_inline: int = 0
+    math_display: int = 0
+
+
+class TextCountFileBreakdown(BaseModel):
+    """Per-file texcount metrics."""
+
+    path: str
+    role: Literal["main", "included"]
+    words_total: int = 0
+    words_text: int = 0
+    words_headers: int = 0
+    words_captions: int = 0
+    headings: int = 0
+    floats: int = 0
+    math_inline: int = 0
+    math_display: int = 0
+
+
+class TextCountResponse(BaseModel):
+    """Structured textcount payload for compile JSON responses."""
+
+    status: Literal["ok", "partial", "unavailable", "error"]
+    message: Optional[str] = None
+    totals: TextCountTotals = Field(default_factory=TextCountTotals)
+    files: List[TextCountFileBreakdown] = Field(default_factory=list)
 
 
 class ErrorResponse(BaseModel):

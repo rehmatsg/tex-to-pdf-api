@@ -23,11 +23,13 @@ from app.models.compile import (
     CompileOptions,
     CompileResult,
     ErrorResponse,
+    TextCountResponse,
     ValidateRequest,
     ValidateResponse,
 )
 from app.services.adapters import build_workdir_from_multipart, build_workdir_from_zip
 from app.services.pipeline import compile_project
+from app.services.textcount import collect_textcount
 from app.services.validators import (
     PayloadTooLargeError,
     ValidationError,
@@ -81,6 +83,7 @@ def _validation_error(exc: ValidationError) -> JSONResponse:
 def _build_compile_response(
     result: CompileResult,
     return_format: str,
+    textcount: TextCountResponse | None = None,
 ) -> Response | JSONResponse:
     """
     Build the HTTP response from a CompileResult.
@@ -91,6 +94,10 @@ def _build_compile_response(
     if result.success and result.pdf_path and result.pdf_path.exists():
         if return_format == "json":
             pdf_b64 = base64.b64encode(result.pdf_path.read_bytes()).decode("ascii")
+            if textcount is None:
+                textcount = TextCountResponse(
+                    status="error", message="textcount was not collected"
+                )
             return JSONResponse(
                 content={
                     "status": "ok",
@@ -100,6 +107,7 @@ def _build_compile_response(
                     "warnings": result.warnings,
                     "log": result.log,
                     "log_truncated": result.log_truncated,
+                    "textcount": textcount.model_dump(),
                 }
             )
 
@@ -245,8 +253,12 @@ async def compile_sync_multifile(
             error_message=result.error_message if not result.success else None,
         )
 
+        textcount: TextCountResponse | None = None
+        if result.success and return_format == "json":
+            textcount = collect_textcount(work_dir, main_file)
+
         # --- build response ---
-        return _build_compile_response(result, return_format)
+        return _build_compile_response(result, return_format, textcount=textcount)
 
     finally:
         cleanup_workdir(work_dir)
@@ -401,8 +413,12 @@ async def compile_zip(
             error_message=result.error_message if not result.success else None,
         )
 
+        textcount: TextCountResponse | None = None
+        if result.success and return_format == "json":
+            textcount = collect_textcount(work_dir, main_file)
+
         # --- build response ---
-        return _build_compile_response(result, return_format)
+        return _build_compile_response(result, return_format, textcount=textcount)
 
     finally:
         cleanup_workdir(work_dir)

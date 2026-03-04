@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     # Compilation
     TIMEOUT_SECONDS: int = 20
     TEX_BIN_PATH: str = "pdflatex"  # Assumes pdflatex is in PATH
+    TEXTCOUNT_BIN_PATH: str = "texcount"
+    TEXTCOUNT_TIMEOUT_SECONDS: int = 5
 
     # Resource limits
     MAX_UPLOAD_SIZE: int = 20 * 1024 * 1024  # 20 MB (bumped from 10 MB for v2)
