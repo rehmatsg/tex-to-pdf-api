@@ -7,6 +7,7 @@ A robust and secure LaTeX compilation API built with FastAPI. Supports multi-fil
 - **Multi-file Compilation** (v2): Upload multiple project files without zipping
 - **Zip Compilation**: Upload zip archives with mandatory `main_file`
 - **Raw Code Validation**: Check if LaTeX compiles without returning a PDF
+- **Bibliography Support**: Automatically runs `bibtex` or `biber` when needed
 - **Security**:
   - `-no-shell-escape` enforced
   - Dangerous TeX macros blocked (`\write18`, `\openout`, etc.)
@@ -24,9 +25,9 @@ A robust and secure LaTeX compilation API built with FastAPI. Supports multi-fil
    ```bash
    pip install -e .
    ```
-2. Ensure `pdflatex` is installed (TeX Live).
+2. Ensure the LaTeX toolchain is installed (TeX Live).
    - **macOS**: `brew install --cask mactex` (full) or `brew install basictex` (minimal)
-   - **Linux**: `sudo apt-get install texlive-latex-recommended texlive-latex-extra`
+   - **Linux**: `sudo apt-get install texlive-latex-recommended texlive-latex-extra texlive-bibtex-extra biber`
    - **Windows**: Install TeX Live or MiKTeX
 3. Start the app:
    ```bash
@@ -80,7 +81,7 @@ Upload individual project files as multipart form data. Each file's `filename` h
 | `main_file` | String   | Yes      | -          | Relative path to the main `.tex` file |
 | `files`     | File[]   | Yes      | -          | Project files (repeated field)       |
 | `engine`    | String   | No       | `pdflatex` | LaTeX engine                         |
-| `passes`    | Int      | No       | `2`        | Compilation passes (1–5)             |
+| `passes`    | Int      | No       | `2`        | Compilation passes (1–5). Bibliography jobs auto-run at least 3 LaTeX passes. |
 | `return`    | String   | No       | `pdf`      | Response format: `pdf` or `json`     |
 
 **Example:**
@@ -150,7 +151,7 @@ Upload a zip archive containing the project. `main_file` is **required** (no aut
 | `file`      | File   | Yes      | -          | Zip archive                          |
 | `main_file` | String | Yes      | -          | Main `.tex` file path inside the zip |
 | `engine`    | String | No       | `pdflatex` | LaTeX engine                         |
-| `passes`    | Int    | No       | `2`        | Compilation passes (1–5)             |
+| `passes`    | Int    | No       | `2`        | Compilation passes (1–5). Bibliography jobs auto-run at least 3 LaTeX passes. |
 | `return`    | String | No       | `pdf`      | Response format: `pdf` or `json`     |
 
 **Example:**
@@ -295,6 +296,8 @@ Environment variables (see `app/core/config.py`):
 | `MAX_LOG_SIZE`    | `65536`    | Maximum log size in bytes        |
 | `MAX_PATH_LENGTH` | `300`      | Maximum file path length         |
 | `TEX_BIN_PATH`    | `pdflatex` | Path to the LaTeX binary         |
+| `BIBTEX_BIN_PATH` | `bibtex`   | Path to the BibTeX binary        |
+| `BIBER_BIN_PATH`  | `biber`    | Path to the biber binary         |
 | `TEXTCOUNT_BIN_PATH` | `texcount` | Path to the texcount binary    |
 | `TEXTCOUNT_TIMEOUT_SECONDS` | `5` | Timeout for texcount subprocesses (seconds) |
 | `LOG_FORMAT`      | `text`     | Log format: `text` or `json`     |

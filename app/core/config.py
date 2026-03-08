@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     # Compilation
     TIMEOUT_SECONDS: int = 20
     TEX_BIN_PATH: str = "pdflatex"  # Assumes pdflatex is in PATH
+    BIBTEX_BIN_PATH: str = "bibtex"
+    BIBER_BIN_PATH: str = "biber"
     TEXTCOUNT_BIN_PATH: str = "texcount"
     TEXTCOUNT_TIMEOUT_SECONDS: int = 5
 

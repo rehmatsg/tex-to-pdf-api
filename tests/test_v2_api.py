@@ -6,16 +6,19 @@ Uses FastAPI TestClient. Tests that require real pdflatex are marked with
 """
 
 import io
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.models.compile import CompileResult
 from tests.conftest import (
-    HAS_PDFLATEX,
     load_fixture_files,
     make_zip_from_fixture,
     make_zip_from_dict,
+    requires_biblatex,
+    requires_bibtex,
     requires_pdflatex,
 )
 
@@ -105,6 +108,46 @@ class TestV2CompileSync:
         )
         assert r.status_code == 200
         assert r.content[:5] == b"%PDF-"
+
+    @requires_bibtex
+    def test_with_classic_bibliography(self):
+        files = load_fixture_files("with_bib")
+        upload_files = [("files", (name, content)) for name, content in files.items()]
+        r = client.post(
+            "/v2/compile/sync",
+            data={"main_file": "main.tex"},
+            files=upload_files,
+        )
+        assert r.status_code == 200
+        assert r.content[:5] == b"%PDF-"
+
+    @requires_bibtex
+    def test_with_classic_bibliography_json_has_no_unresolved_warnings(self):
+        files = load_fixture_files("with_bib")
+        upload_files = [("files", (name, content)) for name, content in files.items()]
+        r = client.post(
+            "/v2/compile/sync",
+            data={"main_file": "main.tex", "return": "json"},
+            files=upload_files,
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "ok"
+        assert not any("undefined" in warning.lower() for warning in body["warnings"])
+
+    @requires_biblatex
+    def test_with_biblatex(self):
+        files = load_fixture_files("with_biblatex")
+        upload_files = [("files", (name, content)) for name, content in files.items()]
+        r = client.post(
+            "/v2/compile/sync",
+            data={"main_file": "main.tex", "return": "json"},
+            files=upload_files,
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "ok"
+        assert not any("undefined" in warning.lower() for warning in body["warnings"])
 
     def test_return_json_format(self):
         """Test 9: return=json returns JSON with logs."""
@@ -201,6 +244,17 @@ class TestV2CompileZip:
         assert r.status_code == 200
         assert r.content[:5] == b"%PDF-"
 
+    @requires_bibtex
+    def test_zip_with_classic_bibliography(self):
+        zip_bytes = make_zip_from_fixture("with_bib")
+        r = client.post(
+            "/v2/compile/zip",
+            data={"main_file": "main.tex"},
+            files=[("file", ("project.zip", zip_bytes, "application/zip"))],
+        )
+        assert r.status_code == 200
+        assert r.content[:5] == b"%PDF-"
+
     def test_zip_missing_main_file(self):
         zip_bytes = make_zip_from_fixture("simple")
         r = client.post(
@@ -282,6 +336,69 @@ class TestV2Validate:
         body = r.json()
         assert body["error_type"] == "invalid_input"
         assert "Dangerous" in body["message"] or "macro" in body["message"].lower()
+
+
+# =====================================================================
+# Mocked compile failures
+# =====================================================================
+
+
+class TestV2CompileFailuresMocked:
+    """Failure-path tests for response semantics around pipeline errors."""
+
+    @patch("app.api.routes_v2.compile_project")
+    def test_biber_missing_returns_specific_compile_error(self, mock_compile):
+        mock_compile.return_value = CompileResult(
+            success=False,
+            pdf_path=None,
+            compile_time_ms=10,
+            log="--- Bibliography (biber) ---\n",
+            error_message="biber binary not found",
+            warnings=[],
+            errors=["biber binary not found"],
+        )
+
+        r = client.post(
+            "/v2/compile/sync",
+            data={"main_file": "main.tex"},
+            files=[
+                ("files", ("main.tex", load_fixture_files("simple")["main.tex"])),
+            ],
+        )
+
+        assert r.status_code == 400
+        body = r.json()
+        assert body["error_type"] == "latex_compile_error"
+        assert body["message"] == "biber binary not found"
+
+    @patch("app.api.routes_v2.compile_project")
+    def test_stale_pdf_is_not_returned_after_backend_failure(self, mock_compile, tmp_path):
+        stale_pdf = tmp_path / "main.pdf"
+        stale_pdf.write_bytes(b"%PDF-1.4 stale")
+
+        mock_compile.return_value = CompileResult(
+            success=False,
+            pdf_path=stale_pdf,
+            compile_time_ms=10,
+            log="--- Pass 1 ---\n--- Bibliography (biber) ---\n",
+            error_message="Biber failed",
+            warnings=[],
+            errors=["Biber failed"],
+        )
+
+        r = client.post(
+            "/v2/compile/sync",
+            data={"main_file": "main.tex"},
+            files=[
+                ("files", ("main.tex", load_fixture_files("simple")["main.tex"])),
+            ],
+        )
+
+        assert r.status_code == 400
+        assert r.headers["content-type"].startswith("application/json")
+        body = r.json()
+        assert body["message"] == "Biber failed"
+        assert body["status"] == "error"
 
 
 # =====================================================================

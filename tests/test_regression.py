@@ -18,7 +18,12 @@ import pytest
 from app.models.compile import CompileOptions
 from app.services.pipeline import compile_project
 from app.services.workdir import create_workdir, cleanup_workdir, safe_write_file
-from tests.conftest import requires_pdflatex, load_fixture_files
+from tests.conftest import (
+    load_fixture_files,
+    make_zip_from_fixture,
+    requires_bibtex,
+    requires_pdflatex,
+)
 
 from fastapi.testclient import TestClient
 from app.main import app
@@ -192,6 +197,16 @@ class TestV1BackwardCompat:
         assert r.status_code == 200
         body = r.json()
         assert body["compilable"] is True
+
+    @requires_bibtex
+    def test_v1_compile_sync_with_bibliography_zip(self):
+        zip_bytes = make_zip_from_fixture("with_bib")
+        r = client.post(
+            "/compile/sync",
+            files={"file": ("project.zip", zip_bytes, "application/zip")},
+        )
+        assert r.status_code == 200
+        assert r.content[:5] == b"%PDF-"
 
     def test_v1_missing_input(self):
         r = client.post("/compile/sync")

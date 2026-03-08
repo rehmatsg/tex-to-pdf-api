@@ -71,13 +71,14 @@ LaTeX API is a stateless HTTP service that compiles LaTeX projects into PDFs. It
 
 - **Python 3.13+**
 - **pdflatex** (from TeX Live or MiKTeX)
+- **bibtex / biber** for bibliography-backed projects
 
 Install pdflatex:
 
 | Platform | Command |
 |----------|---------|
 | macOS    | `brew install --cask mactex` (full) or `brew install basictex` (minimal) |
-| Ubuntu/Debian | `sudo apt-get install texlive-latex-recommended texlive-latex-extra` |
+| Ubuntu/Debian | `sudo apt-get install texlive-latex-recommended texlive-latex-extra texlive-bibtex-extra biber` |
 | Fedora/RHEL | `sudo dnf install texlive-scheme-medium` |
 | Windows  | Install [TeX Live](https://tug.org/texlive/) or [MiKTeX](https://miktex.org/) |
 
@@ -162,7 +163,7 @@ Upload individual project files as multipart form data. Each file's `filename` h
 | `main_file` | string     | **Yes**  | —          | Relative path to the main `.tex` file (must match one of the uploaded filenames) |
 | `files`     | file[]     | **Yes**  | —          | Project files (repeated form field). Each file's `filename` header is the relative path. |
 | `engine`    | string     | No       | `pdflatex` | LaTeX engine to use. Currently only `pdflatex` is supported. |
-| `passes`    | integer    | No       | `2`        | Number of compilation passes (1–5). Use 2+ for cross-references/bibliography. |
+| `passes`    | integer    | No       | `2`        | Number of compilation passes (1–5). Bibliography jobs automatically run at least 3 LaTeX passes. |
 | `return`    | string     | No       | `pdf`      | Response format: `pdf` (raw binary) or `json` (base64-encoded PDF in JSON). |
 
 **Success Response (return=pdf):** `200 OK`
@@ -535,6 +536,8 @@ All settings can be overridden via environment variables or a `.env` file in the
 | `PROJECT_NAME`     | string  | `LaTeX API`  | Application name (shown in OpenAPI docs) |
 | `TIMEOUT_SECONDS`  | integer | `20`         | Compilation timeout in seconds |
 | `TEX_BIN_PATH`     | string  | `pdflatex`   | Path to the pdflatex binary (or just the name if it's on PATH) |
+| `BIBTEX_BIN_PATH`  | string  | `bibtex`     | Path to the bibtex binary (or just the name if it's on PATH) |
+| `BIBER_BIN_PATH`   | string  | `biber`      | Path to the biber binary (or just the name if it's on PATH) |
 | `TEXTCOUNT_BIN_PATH` | string | `texcount` | Path to the texcount binary (or just the name if it's on PATH) |
 | `TEXTCOUNT_TIMEOUT_SECONDS` | integer | `5` | Timeout in seconds for texcount subprocess calls |
 | `MAX_UPLOAD_SIZE`  | integer | `20971520`   | Maximum upload size in bytes (20 MB) |
@@ -579,6 +582,8 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       texlive-latex-recommended \
       texlive-latex-extra \
+      texlive-bibtex-extra \
+      biber \
       texlive-fonts-recommended && \
     rm -rf /var/lib/apt/lists/*
 
@@ -861,7 +866,12 @@ All temp directories are created with `tempfile.mkdtemp(prefix="latex_job_")` an
 - For zip uploads, the path is relative to the zip root (e.g., `src/main.tex`, not `/src/main.tex`).
 
 **Cross-references / bibliography not resolving**
-- Set `passes=3` or higher. LaTeX needs multiple passes to resolve `\ref`, `\cite`, table of contents, etc.
+- The compiler automatically runs `bibtex` or `biber` when the first LaTeX pass requests it.
+- For bibliography projects, the service promotes to at least 3 LaTeX passes automatically. Higher `passes` values are only needed for unusually complex documents.
+
+**`minted` fails even though the package is installed**
+- `minted` requires shell escape and this service always runs LaTeX with `-no-shell-escape`.
+- Use `listings` or another pure-TeX alternative if you need code blocks in this environment.
 
 **V1 vs V2: which should I use?**
 - Use **v2** for new integrations. It has better validation, multi-file support without zip, standardized errors, and structured logging.

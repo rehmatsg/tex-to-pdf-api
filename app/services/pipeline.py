@@ -5,26 +5,40 @@ This module provides the single `compile_project()` function that all endpoints
 (v1 and v2) funnel through. It handles:
 - Main file verification
 - Multi-pass pdflatex invocation with -no-shell-escape
-- Output PDF detection based on actual main_file stem (fixes v1 bug)
+- Automatic bibliography orchestration via bibtex / biber
+- Output PDF detection based on actual main_file stem
 - Log parsing for errors and warnings
 - Log truncation
 - Compile timeout handling
 """
 
-import logging
 import re
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from app.core.config import settings
 from app.models.compile import CompileOptions, CompileResult
 
-logger = logging.getLogger(__name__)
-
 # Pre-compiled regex for -file-line-error format: ./file.tex:123: Error message
 _FILE_LINE_RE = re.compile(r"^\./[^:]+:\d+:\s+(.+)")
+_BIBER_ERROR_RE = re.compile(r"^(?:ERROR|FATAL)\s*-\s*(.+)$")
+_BIBER_WARNING_RE = re.compile(r"^(?:WARN(?:ING)?)\s*-\s*(.+)$")
+
+BackendName = Literal["bibtex", "biber"]
+
+
+@dataclass
+class _StepExecution:
+    """Captured output and status from one subprocess invocation."""
+
+    label: str
+    output: str
+    returncode: Optional[int] = None
+    timed_out: bool = False
+    missing_binary_message: Optional[str] = None
 
 
 def compile_project(
@@ -49,7 +63,6 @@ def compile_project(
     """
     start_time = time.time()
 
-    # --- Verify main file exists ---
     main_file_path = work_dir / main_file
     if not main_file_path.exists():
         return CompileResult(
@@ -61,104 +74,336 @@ def compile_project(
             errors=[f"Main file not found: {main_file}"],
         )
 
-    # --- Determine the directory to run pdflatex in and the relative filename ---
-    # pdflatex must be invoked from the directory containing the main file's
-    # parent so that \input / \include relative paths resolve correctly.
-    # Example: main_file="src/main.tex" -> cwd=work_dir, arg="src/main.tex"
+    main_stem = Path(main_file).stem
     compile_cwd = work_dir
+    log_sections: list[str] = []
+    backend_warnings: list[str] = []
+    final_tex_warnings: list[str] = []
 
-    # --- Run compilation passes ---
-    log_output = ""
-    last_returncode: Optional[int] = None
+    # First pdflatex pass determines whether bibliography tooling is needed.
+    first_pass = _run_pdflatex_step(
+        main_file=main_file,
+        compile_cwd=compile_cwd,
+        timeout_seconds=options.timeout_seconds,
+        pass_number=1,
+    )
+    log_sections.append(_format_log_section(first_pass))
 
-    for i in range(options.passes):
-        cmd = [
+    if first_pass.missing_binary_message:
+        return _missing_binary_result(
+            start_time=start_time,
+            log_sections=log_sections,
+            message=first_pass.missing_binary_message,
+        )
+
+    first_errors, first_warnings = _parse_latex_log_messages(first_pass.output)
+    if first_pass.timed_out:
+        return _timeout_result(
+            start_time=start_time,
+            log_sections=log_sections,
+            timeout_seconds=options.timeout_seconds,
+            label=first_pass.label,
+            errors=first_errors,
+            warnings=first_warnings,
+        )
+
+    if first_pass.returncode != 0:
+        return _failure_result(
+            start_time=start_time,
+            log_sections=log_sections,
+            errors=first_errors,
+            warnings=first_warnings,
+            error_message=first_errors[0] if first_errors else "Compilation failed",
+        )
+
+    bibliography_backend = _detect_bibliography_backend(work_dir, main_stem)
+    total_tex_passes = (
+        options.passes if bibliography_backend is None else max(options.passes, 3)
+    )
+
+    if bibliography_backend is None:
+        final_tex_warnings = first_warnings
+    else:
+        backend_step = _run_backend_step(
+            backend=bibliography_backend,
+            compile_cwd=compile_cwd,
+            main_stem=main_stem,
+            timeout_seconds=options.timeout_seconds,
+        )
+        log_sections.append(_format_log_section(backend_step))
+
+        backend_errors, backend_step_warnings = _parse_backend_messages(
+            bibliography_backend, backend_step.output
+        )
+        backend_warnings = backend_step_warnings
+
+        if backend_step.missing_binary_message:
+            return _missing_binary_result(
+                start_time=start_time,
+                log_sections=log_sections,
+                message=backend_step.missing_binary_message,
+                warnings=backend_warnings,
+            )
+
+        if backend_step.timed_out:
+            return _timeout_result(
+                start_time=start_time,
+                log_sections=log_sections,
+                timeout_seconds=options.timeout_seconds,
+                label=backend_step.label,
+                errors=backend_errors,
+                warnings=backend_warnings,
+            )
+
+        if backend_step.returncode != 0:
+            fallback_message = (
+                "Biber failed" if bibliography_backend == "biber" else "BibTeX failed"
+            )
+            if not backend_errors:
+                backend_errors = [fallback_message]
+            return _failure_result(
+                start_time=start_time,
+                log_sections=log_sections,
+                errors=backend_errors,
+                warnings=backend_warnings,
+                error_message=backend_errors[0] if backend_errors else fallback_message,
+            )
+
+    for pass_number in range(2, total_tex_passes + 1):
+        tex_step = _run_pdflatex_step(
+            main_file=main_file,
+            compile_cwd=compile_cwd,
+            timeout_seconds=options.timeout_seconds,
+            pass_number=pass_number,
+        )
+        log_sections.append(_format_log_section(tex_step))
+
+        if tex_step.missing_binary_message:
+            return _missing_binary_result(
+                start_time=start_time,
+                log_sections=log_sections,
+                message=tex_step.missing_binary_message,
+                warnings=backend_warnings,
+            )
+
+        tex_errors, tex_warnings = _parse_latex_log_messages(tex_step.output)
+        if tex_step.timed_out:
+            return _timeout_result(
+                start_time=start_time,
+                log_sections=log_sections,
+                timeout_seconds=options.timeout_seconds,
+                label=tex_step.label,
+                errors=tex_errors,
+                warnings=backend_warnings + tex_warnings,
+            )
+
+        if tex_step.returncode != 0:
+            return _failure_result(
+                start_time=start_time,
+                log_sections=log_sections,
+                errors=tex_errors,
+                warnings=backend_warnings + tex_warnings,
+                error_message=tex_errors[0] if tex_errors else "Compilation failed",
+            )
+
+        final_tex_warnings = tex_warnings
+
+    expected_pdf = _find_expected_pdf(work_dir, main_file)
+    warnings = backend_warnings + final_tex_warnings
+
+    if not expected_pdf.exists():
+        return _failure_result(
+            start_time=start_time,
+            log_sections=log_sections,
+            errors=[],
+            warnings=warnings,
+            error_message="Compilation failed",
+        )
+
+    return CompileResult(
+        success=True,
+        pdf_path=expected_pdf,
+        compile_time_ms=int((time.time() - start_time) * 1000),
+        log=_join_log_sections(log_sections),
+        error_message=None,
+        log_truncated=_is_truncated(log_sections),
+        warnings=warnings,
+        errors=[],
+    )
+
+
+def _run_pdflatex_step(
+    main_file: str,
+    compile_cwd: Path,
+    timeout_seconds: int,
+    pass_number: int,
+) -> _StepExecution:
+    return _run_step(
+        label=f"Pass {pass_number}",
+        cmd=[
             settings.TEX_BIN_PATH,
             "-interaction=nonstopmode",
             "-halt-on-error",
             "-file-line-error",
             "-no-shell-escape",
             main_file,
-        ]
+        ],
+        cwd=compile_cwd,
+        timeout_seconds=timeout_seconds,
+        missing_binary_message="pdflatex binary not found",
+    )
 
-        try:
-            result = subprocess.run(
-                cmd,
-                cwd=str(compile_cwd),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                timeout=options.timeout_seconds,
-                text=True,
-            )
 
-            log_output += f"--- Pass {i + 1} ---\n"
-            log_output += result.stdout or ""
-            last_returncode = result.returncode
+def _run_backend_step(
+    backend: BackendName,
+    compile_cwd: Path,
+    main_stem: str,
+    timeout_seconds: int,
+) -> _StepExecution:
+    if backend == "biber":
+        return _run_step(
+            label="Bibliography (biber)",
+            cmd=[settings.BIBER_BIN_PATH, main_stem],
+            cwd=compile_cwd,
+            timeout_seconds=timeout_seconds,
+            missing_binary_message="biber binary not found",
+        )
 
-            if result.returncode != 0:
-                break  # Stop on first error
+    return _run_step(
+        label="Bibliography (bibtex)",
+        cmd=[settings.BIBTEX_BIN_PATH, main_stem],
+        cwd=compile_cwd,
+        timeout_seconds=timeout_seconds,
+        missing_binary_message="bibtex binary not found",
+    )
 
-        except FileNotFoundError:
-            compile_time = int((time.time() - start_time) * 1000)
-            return CompileResult(
-                success=False,
-                compile_time_ms=compile_time,
-                log=log_output,
-                error_message="pdflatex binary not found",
-                warnings=[],
-                errors=["pdflatex binary not found"],
-            )
 
-        except subprocess.TimeoutExpired:
-            compile_time = int((time.time() - start_time) * 1000)
-            log_output += (
-                f"\n--- Timeout after {options.timeout_seconds}s on pass {i + 1} ---"
-            )
+def _run_step(
+    label: str,
+    cmd: list[str],
+    cwd: Path,
+    timeout_seconds: int,
+    missing_binary_message: str,
+) -> _StepExecution:
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=str(cwd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout_seconds,
+            text=True,
+        )
+        return _StepExecution(
+            label=label,
+            output=result.stdout or "",
+            returncode=result.returncode,
+        )
+    except FileNotFoundError:
+        return _StepExecution(
+            label=label,
+            output="",
+            missing_binary_message=missing_binary_message,
+        )
+    except subprocess.TimeoutExpired as exc:
+        output = exc.stdout or ""
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
+        return _StepExecution(label=label, output=output, timed_out=True)
 
-            errors, warnings = _parse_log_messages(log_output)
-            log_output, truncated = _truncate_log(log_output)
 
-            return CompileResult(
-                success=False,
-                compile_time_ms=compile_time,
-                log=log_output,
-                error_message="Compilation timed out",
-                log_truncated=truncated,
-                warnings=warnings,
-                errors=errors,
-            )
+def _detect_bibliography_backend(
+    work_dir: Path,
+    main_stem: str,
+) -> Optional[BackendName]:
+    bcf_path = work_dir / f"{main_stem}.bcf"
+    if bcf_path.exists():
+        return "biber"
 
-    # --- Detect output PDF ---
-    # pdflatex produces a PDF named after the main file's stem.  When run
-    # from work_dir the output lands in the *cwd* (work_dir), NOT alongside
-    # the source file.  E.g. running `pdflatex src/main.tex` from work_dir
-    # creates `work_dir/main.pdf`, not `work_dir/src/main.pdf`.
-    # We check the cwd location first, then the source directory as fallback.
-    main_stem = Path(main_file).stem
-    main_parent = Path(main_file).parent
+    aux_path = work_dir / f"{main_stem}.aux"
+    if aux_path.exists():
+        aux_text = aux_path.read_text(encoding="utf-8", errors="ignore")
+        if r"\bibdata" in aux_text:
+            return "bibtex"
 
-    # Primary: PDF in cwd (work_dir)
-    expected_pdf = work_dir / f"{main_stem}.pdf"
-    if not expected_pdf.exists():
-        # Fallback: PDF alongside source file
-        expected_pdf = work_dir / main_parent / f"{main_stem}.pdf"
+    return None
 
-    success = expected_pdf.exists()
 
-    # --- Parse and truncate log ---
-    errors, warnings = _parse_log_messages(log_output)
+def _find_expected_pdf(work_dir: Path, main_file: str) -> Path:
+    main_path = Path(main_file)
+    expected_pdf = work_dir / f"{main_path.stem}.pdf"
+    if expected_pdf.exists():
+        return expected_pdf
+    return work_dir / main_path.parent / f"{main_path.stem}.pdf"
+
+
+def _format_log_section(step: _StepExecution) -> str:
+    output = step.output or ""
+    return f"--- {step.label} ---\n{output}"
+
+
+def _join_log_sections(log_sections: list[str]) -> str:
+    log_output = "".join(log_sections)
+    truncated_log, _ = _truncate_log(log_output)
+    return truncated_log
+
+
+def _is_truncated(log_sections: list[str]) -> bool:
+    _, truncated = _truncate_log("".join(log_sections))
+    return truncated
+
+
+def _missing_binary_result(
+    start_time: float,
+    log_sections: list[str],
+    message: str,
+    warnings: Optional[list[str]] = None,
+) -> CompileResult:
+    return _failure_result(
+        start_time=start_time,
+        log_sections=log_sections,
+        errors=[message],
+        warnings=warnings or [],
+        error_message=message,
+    )
+
+
+def _timeout_result(
+    start_time: float,
+    log_sections: list[str],
+    timeout_seconds: int,
+    label: str,
+    errors: list[str],
+    warnings: list[str],
+) -> CompileResult:
+    log_sections = log_sections + [
+        f"\n--- Timeout after {timeout_seconds}s during {label} ---"
+    ]
+    log_output = "".join(log_sections)
     log_output, truncated = _truncate_log(log_output)
-
-    compile_time = int((time.time() - start_time) * 1000)
-
-    error_message: Optional[str] = None
-    if not success:
-        error_message = errors[0] if errors else "Compilation failed"
-
     return CompileResult(
-        success=success,
-        pdf_path=expected_pdf if success else None,
-        compile_time_ms=compile_time,
+        success=False,
+        compile_time_ms=int((time.time() - start_time) * 1000),
+        log=log_output,
+        error_message="Compilation timed out",
+        log_truncated=truncated,
+        warnings=warnings,
+        errors=errors,
+    )
+
+
+def _failure_result(
+    start_time: float,
+    log_sections: list[str],
+    errors: list[str],
+    warnings: list[str],
+    error_message: str,
+) -> CompileResult:
+    log_output = "".join(log_sections)
+    log_output, truncated = _truncate_log(log_output)
+    return CompileResult(
+        success=False,
+        compile_time_ms=int((time.time() - start_time) * 1000),
         log=log_output,
         error_message=error_message,
         log_truncated=truncated,
@@ -168,6 +413,15 @@ def compile_project(
 
 
 def _parse_log_messages(log: str) -> tuple[list[str], list[str]]:
+    """
+    Backward-compatible log parser used by tests and callers.
+
+    Delegates to the LaTeX parser for historic behavior.
+    """
+    return _parse_latex_log_messages(log)
+
+
+def _parse_latex_log_messages(log: str) -> tuple[list[str], list[str]]:
     """
     Extract errors and warnings from LaTeX log output.
 
@@ -187,14 +441,53 @@ def _parse_log_messages(log: str) -> tuple[list[str], list[str]]:
         if stripped.startswith("! "):
             errors.append(stripped[2:].strip())
         else:
-            m = _FILE_LINE_RE.match(stripped)
-            if m:
-                msg = m.group(1).strip()
-                # Skip meta-lines like "==> Fatal error occurred..."
+            match = _FILE_LINE_RE.match(stripped)
+            if match:
+                msg = match.group(1).strip()
                 if msg and not msg.startswith("==>"):
                     errors.append(msg)
         if "LaTeX Warning" in line:
             warnings.append(stripped)
+    return errors, warnings
+
+
+def _parse_backend_messages(
+    backend: BackendName,
+    log: str,
+) -> tuple[list[str], list[str]]:
+    if backend == "biber":
+        return _parse_biber_messages(log)
+    return _parse_bibtex_messages(log)
+
+
+def _parse_biber_messages(log: str) -> tuple[list[str], list[str]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    for line in log.splitlines():
+        stripped = line.strip()
+        error_match = _BIBER_ERROR_RE.match(stripped)
+        warning_match = _BIBER_WARNING_RE.match(stripped)
+
+        if error_match:
+            errors.append(error_match.group(1).strip())
+        elif warning_match:
+            warnings.append(warning_match.group(1).strip())
+
+    return errors, warnings
+
+
+def _parse_bibtex_messages(log: str) -> tuple[list[str], list[str]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    for line in log.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Warning--"):
+            warnings.append(stripped)
+        elif stripped.startswith("I couldn't"):
+            errors.append(stripped)
+
     return errors, warnings
 
 
@@ -206,7 +499,6 @@ def _truncate_log(log: str) -> tuple[str, bool]:
     """
     max_size = settings.MAX_LOG_SIZE
     if len(log.encode("utf-8", errors="replace")) > max_size:
-        # Truncate by characters, aiming for byte limit
         truncated = log[:max_size] + "\n... [Log truncated]"
         return truncated, True
     return log, False

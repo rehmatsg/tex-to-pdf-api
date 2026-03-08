@@ -4,11 +4,12 @@
     "aptPackages": [
       "texlive-latex-base",
       "texlive-latex-extra",
+      "texlive-bibtex-extra",
       "texlive-fonts-recommended",
       "texlive-fonts-extra",
-      "texlive-extra-utils"
+      "texlive-extra-utils",
+      "biber"
     ],
     "startCommand": "uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4"
   }
 }
-

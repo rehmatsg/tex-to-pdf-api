@@ -5,6 +5,7 @@ Shared pytest fixtures for the LaTeX API test suite.
 import io
 import os
 import shutil
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -17,6 +18,26 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures" / "projects"
 
 # Whether pdflatex is available (used for skipping real-compile tests)
 HAS_PDFLATEX = shutil.which("pdflatex") is not None
+HAS_BIBTEX = shutil.which("bibtex") is not None
+HAS_BIBER = shutil.which("biber") is not None
+HAS_KPSEWHICH = shutil.which("kpsewhich") is not None
+
+
+def _has_kpsewhich_file(filename: str) -> bool:
+    if not HAS_KPSEWHICH:
+        return False
+
+    result = subprocess.run(
+        ["kpsewhich", filename],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
+HAS_BIBLATEX_STY = _has_kpsewhich_file("biblatex.sty")
 
 
 @pytest.fixture
@@ -91,4 +112,12 @@ def make_zip_from_dict(files: dict[str, bytes]) -> bytes:
 # Convenience markers
 requires_pdflatex = pytest.mark.skipif(
     not HAS_PDFLATEX, reason="pdflatex not available"
+)
+requires_bibtex = pytest.mark.skipif(
+    not (HAS_PDFLATEX and HAS_BIBTEX),
+    reason="pdflatex and bibtex are required",
+)
+requires_biblatex = pytest.mark.skipif(
+    not (HAS_PDFLATEX and HAS_BIBER and HAS_BIBLATEX_STY),
+    reason="pdflatex, biber, and biblatex.sty are required",
 )
